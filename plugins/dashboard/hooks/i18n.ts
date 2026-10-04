@@ -122,8 +122,6 @@ const zh = {
   cacheCold: '~ 缓存已冷',
   cacheIdle: (time: string) => `闲置 ${time}`,
   cacheRewrite: (tokens: string) => `下一条重写约 ${tokens} tokens`,
-  limitsGroup: '额度',
-  limitWarn: '~ 额度',
   limitReset: (time: string) => `${time}后重置`,
   pendingCount: (n: number) => `! 待处理${n}`,
   runCount: (n: number) => `运行${n}`,
@@ -290,11 +288,13 @@ const zh = {
   usageAskAnswers: (recommended: string, option: string, typed: string, declined: string) => `推荐 ${recommended} · 其他选项 ${option} · 自己输入 ${typed} · 拒绝 ${declined}`,
   usageAskWaits: (under1m: number, under2m: number, under5m: number, under10m: number, over10m: number) => `<1m ${under1m} · 1–2m ${under2m} · 2–5m ${under5m} · 5–10m ${under10m} · >10m ${over10m}`,
   askRemind: '还在等你回答问题',
+  useRecommended: '用推荐项',
+  recommendedLine: (labels: string[]) => `推荐：${labels.join(' · ')}`,
   pageProgress: '进度',
   progressStatuses: { doing: '进行中', blocked: '受阻', todo: '待办', done: '已完成' },
   progressKinds: { feature: '功能', fix: '修复', research: '调研', infra: '基建', docs: '文档' },
   progressBuildsOn: (titles: string[]) => `基于：${titles.join('、')}`,
-  progressEmpty: (where: string | null) => `模型在每次对话结束时添加进度节点；存放位置：${where ?? '尚未选择'}`,
+  progressEmpty: (where: string | null) => `手打的一轮有改动或 commit 后自动记录；存放位置：${where ?? '尚未选择'}`,
 }
 
 const en: typeof zh = {
@@ -410,8 +410,6 @@ const en: typeof zh = {
   cacheCold: '~ cache cold',
   cacheIdle: time => `idle ${time}`,
   cacheRewrite: tokens => `next message rewrites ~${tokens} tokens`,
-  limitsGroup: 'limits',
-  limitWarn: '~ limit',
   limitReset: time => `resets in ${time}`,
   pendingCount: n => `! ${n} pending`,
   runCount: n => ` ${n} running`,
@@ -583,11 +581,13 @@ const en: typeof zh = {
   usageAskAnswers: (recommended, option, typed, declined) => `recommended ${recommended} · other option ${option} · typed ${typed} · declined ${declined}`,
   usageAskWaits: (under1m, under2m, under5m, under10m, over10m) => `<1m ${under1m} · 1–2m ${under2m} · 2–5m ${under5m} · 5–10m ${under10m} · >10m ${over10m}`,
   askRemind: 'A question is still waiting for your answer',
+  useRecommended: 'Use recommended',
+  recommendedLine: labels => `Recommended: ${labels.join(' · ')}`,
   pageProgress: 'Progress',
   progressStatuses: { doing: 'In progress', blocked: 'Blocked', todo: 'To do', done: 'Done' },
   progressKinds: { feature: 'feature', fix: 'fix', research: 'research', infra: 'infra', docs: 'docs' },
   progressBuildsOn: titles => `builds on: ${titles.join(', ')}`,
-  progressEmpty: where => `The model adds nodes at the end of each conversation; stored in: ${where ?? 'not chosen yet'}`,
+  progressEmpty: where => `Recorded after typed turns with edits or commits; stored in: ${where ?? 'not chosen yet'}`,
 }
 
 // Render code reads this synchronously; register sets it from an explicit option and session.start resolves `auto`.

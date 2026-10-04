@@ -1,7 +1,7 @@
 {
   "name": "dashboard",
-  "version": "0.5.13",
-  "description": "Unified workbench: a status band for subagents and mmrun reviews, plus a seven-page pane (Overview / Agents / Reviews / GPU / Timeline / Usage / Progress; Reviews, GPU and Progress show once they have data); the Progress page lists the per-project progress board the main model records each conversation's work on",
+  "version": "0.5.14",
+  "description": "Unified workbench: a status band for subagents and mmrun reviews, plus a seven-page pane (Overview / Agents / Reviews / GPU / Timeline / Usage / Progress; Reviews, GPU and Progress show once they have data); the Progress page lists the per-project progress board, recorded after each typed turn that changed files or made a commit",
   "author": { "name": "Paradox07127" },
   "types": "./types/index.d.ts",
   "userConfig": {

@@ -42,14 +42,14 @@ const offered = async ($: Engine, agent: string) => (await $.agent.offer(offerIn
 
 describe('agent.spawn', () => {
   for (const model of ['sonnet', 'claude-sonnet-4-5', 'Sonnet[1m]']) {
-    test(`denies ${model}`, async ($, on) => {
+    test(`denies ${model} when sonnet is blocked`, { options: { blockedSubagentModels: 'sonnet' } }, async ($, on) => {
       world(on, [])
       const got = await $.agent.spawn(spawnInput(model))
       expect(got.deny).toContain('sonnet')
     })
   }
 
-  for (const model of ['opus', 'claude-opus-5-5', undefined]) {
+  for (const model of ['opus', 'claude-opus-5-5', 'sonnet', undefined]) {
     test(`allows ${model ?? 'omitted model'}`, async ($, on) => {
       world(on, [])
       const got = await $.agent.spawn(spawnInput(model))
@@ -58,7 +58,7 @@ describe('agent.spawn', () => {
     })
   }
 
-  test('a configured comma list replaces the default', { options: { blockedSubagentModels: 'haiku, opus-4' } }, async ($, on) => {
+  test('a configured comma list blocks each entry',{ options: { blockedSubagentModels: 'haiku, opus-4' } }, async ($, on) => {
     world(on, [])
     expect((await $.agent.spawn(spawnInput('claude-Haiku-4-5'))).deny).toContain('haiku')
     expect((await $.agent.spawn(spawnInput('claude-opus-4-1'))).deny).toContain('opus-4')

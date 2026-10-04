@@ -220,11 +220,16 @@ const node = (id: string, title: string, status: string): BoardEvent => ({
 })
 
 describe('the progress page', () => {
-  test('read on opening it and again after a progress tool call; with no storage chosen here, it says so', ZH, async ($, on) => {
-    mock.clock(on, { now: NOW })
-
+  test('read on opening it and every 5 s while it is the current page, not after leaving it; with no storage chosen here, it says so', ZH, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
     const files = seat(on)
+    let reads = 0
 
+    on('state.set', ($, e, next) => {
+      reads += e.plugin === 'dashboard' && e.key === 'progress' ? 1 : 0
+
+      return next(e)
+    })
     files[`${GIT_EVENTS}/sb.json`] = '[]'
     await $.session.start(SESSION)
 
@@ -234,12 +239,19 @@ describe('the progress page', () => {
     await pane.press({ key: 'page-progress' })
     expect(linesOf(await pane.drawn()).join('\n')).toContain('尚未选择')
 
-    // What the progress tool leaves behind, by the progress plugin's name once released.
+    // What a recording leaves behind, by this session or another.
     files[`${BOARD}/config.json`] = JSON.stringify({ storage: 'git' })
-    files[`${GIT_EVENTS}/sa.json`] = JSON.stringify([node('n1', 'Progress tool', 'done'), node('n2', 'Progress page', 'doing')])
-    await $.classic.PostToolUse({ tool_name: 'mcp__progress__progress', tool_input: {}, tool_response: 'Recorded', tool_use_id: 'toolu_p', cwd: '/r' } as never)
+    files[`${GIT_EVENTS}/sa.json`] = JSON.stringify([node('n1', 'Progress hook', 'done'), node('n2', 'Progress page', 'doing')])
+    await clock.advance(5_000)
 
-    expect(linesOf(await pane.drawn()).join('\n')).toMatch(/进行中[\s\S]*Progress page[\s\S]*已完成[\s\S]*Progress tool/)
+    expect(linesOf(await pane.drawn()).join('\n')).toMatch(/进行中[\s\S]*Progress page[\s\S]*已完成[\s\S]*Progress hook/)
+
+    await pane.press({ key: 'page-overview' })
+
+    const left = reads
+
+    await clock.advance(15_000)
+    expect(reads, 'no read once the page is left').toBe(left)
     await pane.unmount()
   })
 })

@@ -251,8 +251,6 @@ export type DashUsage = {
   rateLimits: { kind: string; percentUsed: number; resetsAt?: string }[]
   /** US dollars so far; null where the host keeps no ledger. */
   cost: { usd: number } | null
-  /** `${kind}@${resetsAt}` of the rate-limit windows whose line left the band: it does not come back before the window resets. */
-  limitsGone: string[]
 }
 
 /** A step's token counts as the API reported them. */

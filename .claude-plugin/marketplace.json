@@ -1,7 +1,7 @@
 {
   "name": "claude-utopia",
   "owner": { "name": "Paradox07127" },
-  "description": "Claude Code mods and plugins: a status band and workbench, a progress board, multi-model code review, and guardrails. Work in progress.",
+  "description": "Claude Code mods and plugins: a status band and workbench, a progress board, multi-model code review, and guardrails. Under active development.",
   "plugins": [
     {
       "name": "dashboard",
@@ -21,7 +21,7 @@
     {
       "name": "progress",
       "source": "./plugins/progress",
-      "description": "A per-project progress board: the main model records each conversation's work through the progress tool; an optional Artifact canvas mirrors it."
+      "description": "A per-project progress board: after each typed turn that edited files or made a commit, the plugin records its work through a Sonnet completion and mirrors it to an optional Artifact canvas."
     }
   ]
 }

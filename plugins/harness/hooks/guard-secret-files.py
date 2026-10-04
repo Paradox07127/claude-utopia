@@ -17,12 +17,15 @@ HOMES = {HOME, os.path.realpath(HOME)}
 # Relative to HOME; `*` also crosses `/`
 HOME_SECRETS = [".claude.json", ".claude.json.*", ".claude/backups/*", ".claude/settings.json", ".claude/settings.json.*",
                 ".claude/settings.local.json", ".codex/config.toml", ".codex/config.toml.*", ".codex/auth.json",
-                ".openviking/*", ".grok/auth.json"]
+                ".openviking/*", ".grok/auth.json", ".claude/file-history/*", ".codex/shell_snapshots/*"]
 SECRET_NAMES = {"ovcli.conf", "ov.conf"}  # matched anywhere: the server side is reached over ssh
 MENTION = re.compile(r"\.claude\.json|\.claude/settings\.json|\.claude/settings\.local\.json|\.claude/backups"
-                     r"|\.codex/config\.toml|\.codex/auth\.json|\.openviking(?:/|(?![\w.-]))|\.grok/auth\.json"
+                     r"|\.claude/file-history|\.codex/shell_snapshots|\.codex/config\.toml|\.codex/auth\.json|\.openviking(?:/|(?![\w.-]))|\.grok/auth\.json"
                      r"|(?<![\w.-])(?:ovcli|ov)\.conf(?![\w.-])")
 SPLIT = re.compile(r"&&|\|\||\$\(|[;&|()\n`]")
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1([^\n]*)\n(.*?)\n\s*\2\s*(?=\n|$)", re.S)
+SHELL_FED = re.compile(r"(?:ba|z|da|k)?sh|python[\d.]*|node|ruby|perl|osascript")
+MESSAGE_FLAGS = {"-m", "--message", "-t", "--title", "-b", "--body"}  # gh / git: the next word is text, not a file
 WRAPPERS = {"sudo", "command", "time", "nohup"}
 ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
 METADATA = {"ls", "stat", "test", "[", "chmod", "chown", "touch", "wc", "du", "file", "echo", "printf"}
@@ -75,8 +78,8 @@ def allowed(words):
     return name == "git" and words[1:2] == ["commit"]
 
 
-def check_bash(command, cwd):
-    """(reason template, call, file) for the first refused simple command, or None."""
+def simple_commands(command):
+    """(segment, words) per simple command, past assignments and wrappers."""
     for segment in SPLIT.split(command):
         try:
             words = shlex.split(segment)
@@ -88,11 +91,31 @@ def check_bash(command, cwd):
             words = words[1:]
             while words and words[0].startswith("-"):
                 words = words[1:]
-        if not words:
-            continue
+        if words:
+            yield segment, words
+
+
+def drop_heredocs(command):
+    """The command without heredoc bodies that are only text: kept when fed to a shell or interpreter,
+    or when an unquoted delimiter lets the body run $( ) or backticks."""
+    def body(m):
+        line = command[command.rfind("\n", 0, m.start()) + 1:m.start()] + m.group(3)
+        fed = any(SHELL_FED.fullmatch(os.path.basename(words[0])) for _, words in simple_commands(line))
+        expands = not m.group(1) and re.search(r"\$\(|`", m.group(4))
+        return m.group(0) if fed or expands else m.group(3)
+    return HEREDOC.sub(body, command)
+
+
+def check_bash(command, cwd):
+    """(reason template, call, file) for the first refused simple command, or None."""
+    for segment, words in simple_commands(drop_heredocs(command)):
         if env_dump(words):
             return ENV_REASON, segment.strip(), None
-        mention = MENTION.search(segment)
+        text = segment
+        if os.path.basename(words[0]) in ("gh", "git"):
+            text = " ".join(w for i, w in enumerate(words) if not (i and words[i - 1] in MESSAGE_FLAGS)
+                            and not re.match(r"--(?:message|title|body)=", w))
+        mention = MENTION.search(text)
         if mention and not allowed(words):
             return REASON, segment.strip(), mention.group(0)
         # A recursive search of a directory such as ~/.codex prints lines of the secret files inside it

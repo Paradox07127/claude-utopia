@@ -247,6 +247,8 @@ function seat(on: On, files: Files, sessions: Record<string, string> = {}, clock
   })
   on('turn.complete', ($, e) => ({ text: e.answer }) as never)
   on('session.messages', () => ({ value: faults.messages === null ? AGENT_ROWS : { deny: faults.messages } }) as never)
+  // AskUserQuestion is drawn by exactly one engine node: core's own dialog.
+  on('ui.render', { component: 'AskUserQuestion' }, () => ({ type: 'engine', ref: 0 }) as never)
   on('ui.render', () => BOTTOM as never)
 
   return faults
@@ -708,7 +710,7 @@ describe('every color follows the theme', () => {
         await pane.unmount()
       })
 
-      test(`a rate limit past 80%, the prompt hint, and a gate an edit made stale on ${surface} in ${lang}`, options, async ($, on) => {
+      test(`the prompt hint and a gate an edit made stale on ${surface} in ${lang}`, options, async ($, on) => {
         const clock = mock.clock(on, { now: NOW })
         const hints: unknown[] = []
         const limit = (percentUsed: number) => ({ kind: 'five_hour', percentUsed, resetsAt: new Date(NOW + 7_800_000).toISOString() })
@@ -733,8 +735,6 @@ describe('every color follows the theme', () => {
         const found: string[] = []
         const band = await $.ui.mount({ plugin: PLUGIN, ...BAND, surface } as never)
 
-        check(await band.drawn(), 'band-limit', surface, lang, found)
-        expect((await band.findAll({ type: 'Text', text: /^~ (额度|limit)$/ })).map(one => one.props.color), 'the limit line warns').toEqual(['warning'])
         await measure(40)
         check(await band.drawn(), 'band-stale-gate', surface, lang, found)
         expect((await band.findAll({ type: 'Text', text: /^✗$/ })).map(one => one.props.color), 'a stale failure is not red').toEqual(['inactive'])
@@ -1105,6 +1105,26 @@ describe('every color follows the theme', () => {
         }
 
         expect(found).toEqual([])
+      })
+
+      test(`the use-recommended row above a question dialog on ${surface} in ${lang}`, options, async ($, on) => {
+        seat(on, {})
+
+        const option = (label: string) => ({ label, description: 'd' })
+        const questions = [
+          { question: 'Which way?', header: 'Way', options: [option('Bold (Recommended)'), option('Careful')], multiSelect: false },
+          { question: 'Which lib?', header: 'Lib', options: [option('dayjs'), option('luxon (Recommended)')], multiSelect: false },
+        ]
+        const ui = await $.ui.mount({ plugin: PLUGIN, surface, component: 'AskUserQuestion', requestId: 'toolu_q', viewport: { columns: 100, rows: 40 }, props: { tool: 'AskUserQuestion', questions } } as never)
+        const drawn = await ui.drawn()
+        const isEn = lang === 'en'
+        const line = `${isEn ? 'Recommended: ' : '推荐：'}Bold (Recommended) · luxon (Recommended)`
+
+        expect(check(drawn, 'ask-recommended', surface, lang)).toEqual([])
+        expect((await ui.find({ key: 'ask-recommended' }))?.props.label).toBe(isEn ? 'Use recommended' : '用推荐项')
+        expect((await ui.findAll({ type: 'Text' })).find(one => one.text === line)?.props.color).toBe('subtle')
+        expect(JSON.stringify(drawn), "the engine's dialog stays beneath").toContain('"type":"engine"')
+        await ui.unmount()
       })
     }
   }

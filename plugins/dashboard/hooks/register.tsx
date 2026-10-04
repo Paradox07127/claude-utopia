@@ -29,6 +29,7 @@ import type {
   WorktreeInfo,
 } from '../types'
 import { fit, fmtDuration, fmtTokens, noteDenied, noteDone, noteListed, noteResumed, noteSpawn, noteTool, peekOf, toolLabel, widthOf } from './agent-model'
+import { registerAskRecommended } from './ask-recommended'
 import {
   agentFold,
   agentTable,
@@ -41,13 +42,11 @@ import {
   foldText,
   GATE_COMMAND_COLUMNS,
   gateCounts,
-  goneLimits,
   HOTKEY_COLUMNS,
   idleLine,
   isFailedGate,
   isStalled,
   limitText,
-  LIMITS_GROUP,
   MAX_BAND_ROWS,
   nextBandChange,
   OVERVIEW_GATES,
@@ -66,7 +65,6 @@ import {
   splitRow,
   usageLines,
   usageText,
-  warnedLimits,
 } from './board'
 import type { ButtonRow, ColdCache, Line, OverviewItem, Seg } from './board'
 import { drawDesktopBand, drawDesktopPane, drawDesktopPaneError, posixQuote } from './desktop'
@@ -103,8 +101,8 @@ const pages = () =>
   ] as const
 // Tabs drawn only while their data exists (tabsWithData), or while their page is open.
 const ON_DEMAND: readonly DashPage[] = ['mmrun', 'gpu', 'progress']
-// The progress tool, as the dashboard registers it in the source tree and the progress plugin once released.
-const PROGRESS_TOOL_NAME = /^mcp__(?:dashboard|progress)__progress$/
+// The progress page reads the board again this often while it is the current page: recordings land there from any session.
+const PROGRESS_READ_MS = 5_000
 // Each only opens a page, so each runs mid-turn instead of waiting for the turn to end.
 const COMMANDS = [
   { name: 'dashboard', description: 'Open the workbench on its last page: subagents, reviews, GPU', immediate: true },
@@ -186,7 +184,7 @@ const peers = atom({ plugin: 'dashboard', key: 'peers' } as const, null as Sessi
 const toasted = atom({ plugin: 'dashboard', key: 'toasted' } as const, [] as string[], { shape: SHAPE })
 const ownPresence = atom({ plugin: 'dashboard', key: 'presence' } as const, null as SessionPresence | null, { shape: SHAPE })
 const cache = atom({ plugin: 'dashboard', key: 'cache' } as const, { lastReplyAt: null, resumeTokens: null, ttlMs: null } as DashCache, { shape: SHAPE })
-const measured = atom({ plugin: 'dashboard', key: 'usage' } as const, { context: null, rateLimits: [], cost: null, limitsGone: [] } as DashUsage, { shape: SHAPE })
+const measured = atom({ plugin: 'dashboard', key: 'usage' } as const, { context: null, rateLimits: [], cost: null } as DashUsage, { shape: SHAPE })
 const timeline = atom({ plugin: 'dashboard', key: 'timeline' } as const, [] as TimelineTurn[], { shape: SHAPE })
 const timelineTurn = atom({ plugin: 'dashboard', key: 'timelineTurn' } as const, null as string | null)
 const timelineView = atom({ plugin: 'dashboard', key: 'timelineView' } as const, 'turn' as DashTimelineView)
@@ -251,6 +249,8 @@ let toastOptions = { askSound: false, peerAsks: true, peerReplies: true, runs: t
 let hasGpuHosts = false
 // The on-demand tabs whose data existed when the workbench last opened; null before the first check this load.
 let shownTabs: ReadonlySet<DashPage> | null = null
+// The progress page's re-read of the board; null while another page is current or the pane is closed.
+let progressRead: Timer | null = null
 
 // Ephemeral desktop command disclosure states: which command boxes are open.
 export const openDisclosures = new Set<string>()
@@ -481,7 +481,6 @@ async function boardNow($: EngineInterface) {
     (await read($, peers)) ?? [],
     await coldNow($, now),
     await flightsNow($),
-    warnedLimits(await read($, measured)),
     await read($, trees),
   )
 }
@@ -519,7 +518,7 @@ async function isTimelineLive($: EngineInterface): Promise<boolean> {
 async function isLive($: EngineInterface): Promise<boolean> {
   return (
     (await read($, agents)).some(one => one.state === 'running') ||
-    (await boardNow($)).entries.some(entry => entry.tier !== 1 && entry.group !== CACHE_GROUP && entry.group !== LIMITS_GROUP) ||
+    (await boardNow($)).entries.some(entry => entry.tier !== 1 && entry.group !== CACHE_GROUP) ||
     (await isTimelineLive($))
   )
 }
@@ -1503,6 +1502,9 @@ async function goTo($: EngineInterface, to: DashPage): Promise<void> {
 
   if (to === 'progress') {
     await collectProgress($).catch(() => undefined)
+    startProgress($)
+  } else {
+    stopProgress()
   }
 }
 
@@ -1541,7 +1543,7 @@ async function usageNow($: EngineInterface): Promise<UsageWeek> {
   return weekOf(daysOf(await read($, usageRead), await read($, ledger)), lastDays(await $.clock.now()))
 }
 
-// Progress: each session writes only its own <events dir>/<id>.json, whole after each call; the board folds them all.
+// Progress: each session writes only its own <events dir>/<id>.json, whole after each recording; the board folds them all.
 
 /** The project's board: its key and config dir under the home directory, the session root, and the storage chosen, null before the person chose. */
 async function boardPlace($: EngineInterface): Promise<{ home: string; project: string; root: string; storage: BoardStorage | null }> {
@@ -1573,6 +1575,27 @@ async function collectProgress($: EngineInterface): Promise<void> {
   const nodes = dir === null ? [] : foldBoard(Object.values(await readEvents($, dir)).flat())
 
   await update($, progress, () => ({ storage: place.storage, dir, nodes }))
+}
+
+/** Ends the progress page's re-read. goTo ends it on leaving the page. */
+function stopProgress(): void {
+  progressRead?.cancel()
+  progressRead = null
+}
+
+/** Reads the board every PROGRESS_READ_MS while the progress page is the current page and the pane is up. */
+function startProgress($: EngineInterface): void {
+  progressRead ??= $.clock.every(PROGRESS_READ_MS, () => {
+    void (async () => {
+      if ((await read($, page)) !== 'progress' || !(await isPaneUp($))) {
+        stopProgress()
+
+        return
+      }
+
+      await collectProgress($)
+    })().catch(() => undefined)
+  })
 }
 
 /** Opens the GPU page for an ssh to a listed host, only while the workbench is closed and the person never closed it. */
@@ -1754,6 +1777,7 @@ export const register: Register = (on, options) => {
 
   registerTranscript(on)
   registerTimeline(on)
+  registerAskRecommended(on)
 
   // A structured atom reads a value kept under another shape tag as its initial value: said once per key.
   on('state.get', { plugin: 'dashboard' }, async ($, e, next) => {
@@ -2092,11 +2116,6 @@ export const register: Register = (on, options) => {
       await noteEdit($, input.file_path ?? input.notebook_path)
     }
 
-    // The progress tool wrote the board: the progress page reads it again.
-    if (PROGRESS_TOOL_NAME.test(e.tool_name)) {
-      await collectProgress($).catch(() => undefined)
-    }
-
     return next(e)
   }).catch(($, e, next) => {
     hookFailed($, 'classic.PostToolUse', next.error)
@@ -2246,6 +2265,8 @@ export const register: Register = (on, options) => {
       return next(e)
     }
 
+    stopProgress()
+
     if (e.origin.kind === 'person') {
       await closedByPerson($)
     } else {
@@ -2277,7 +2298,7 @@ export const register: Register = (on, options) => {
 
     const bNow = await boardNow($)
 
-    armBandWake($, nextBandChange(await read($, gates), warnedLimits(await read($, measured)), bNow.now, await read($, trees)), bNow.now)
+    armBandWake($, nextBandChange(await read($, gates), bNow.now, await read($, trees)), bNow.now)
 
     const board = bandLines(bNow, Math.min(e.props.maxRows, MAX_BAND_ROWS), e.props.bodyColumns - buttonColumns())
     const lines = board.length === 0 ? [await idleNow($)] : board
@@ -2333,7 +2354,7 @@ export const register: Register = (on, options) => {
   // Context, rate limits and cost under the prompt, as the engine measured them
 
   on('session.measure', async ($, e, next) => {
-    await update($, measured, was => ({ context: e.context, rateLimits: e.rateLimits, cost: e.cost ?? null, limitsGone: goneLimits(was, e.rateLimits) }))
+    await update($, measured, () => ({ context: e.context, rateLimits: e.rateLimits, cost: e.cost ?? null }))
 
     return next(e)
   }).catch(($, e, next) => {

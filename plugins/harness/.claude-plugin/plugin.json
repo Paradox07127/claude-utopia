@@ -7,7 +7,7 @@
   "userConfig": {
     "blockedSubagentModels": {
       "type": "string",
-      "default": "sonnet",
+      "default": "",
       "title": "Blocked subagent models",
       "description": "Comma-separated. Subagents whose model name contains any entry (case-insensitive) are refused; empty allows all."
     },

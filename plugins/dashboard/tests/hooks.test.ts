@@ -118,6 +118,10 @@ type World = {
   specs: CommandSpec[]
   /** Command names `$.command.register` refuses. */
   refusedNames: Set<string>
+  /** Names of the tools the plugin registered. */
+  tools: string[]
+  /** Every `$.ui.log` line. */
+  logs: { text: string; to: string }[]
   stdout: string
   files: Files
   alive: Set<string>
@@ -175,7 +179,7 @@ function writtenAt(text: string): number {
 
 /** The engine beneath the plugin, in memory; ~/.claude/mmruns holds `files`. With `clock`, a GPU ssh sends a pass every 3 s, else its first alone. */
 function seat(on: On, files: Files = {}, clock?: MockClock): World {
-  const world: World = { opened: [], panes: new Set(), hidden: new Set(), runs: [], commands: [], specs: [], refusedNames: new Set(), stdout: TEGRA_RUN, files, alive: new Set(), kills: [], reads: [], toasts: [], sessions: {}, copies: [], hints: [], listed: [], listCalls: 0, listDenied: {}, invalidated: 0, toolResults: 0, statuses: [], clips: [], isMuted: false, spawns: [], spawnedAt: [], samples: 0, killed: 0, sshDown: null }
+  const world: World = { opened: [], panes: new Set(), hidden: new Set(), runs: [], commands: [], specs: [], refusedNames: new Set(), tools: [], logs: [], stdout: TEGRA_RUN, files, alive: new Set(), kills: [], reads: [], toasts: [], sessions: {}, copies: [], hints: [], listed: [], listCalls: 0, listDenied: {}, invalidated: 0, toolResults: 0, statuses: [], clips: [], isMuted: false, spawns: [], spawnedAt: [], samples: 0, killed: 0, sshDown: null }
   let spawned = 0
 
   mock.env(on, { HOME: '/h' })
@@ -196,6 +200,16 @@ function seat(on: On, files: Files = {}, clock?: MockClock): World {
     world.specs.push(e)
 
     return { value: { command: e.name } }
+  })
+  on('ui.log', ($, e) => {
+    world.logs.push({ text: e.text, to: e.to })
+
+    return { value: undefined }
+  })
+  on('tool.register', ($, e) => {
+    world.tools.push(e.name)
+
+    return { value: { tool: `mcp__dashboard__${e.name}` } }
   })
   on('ui.open', ($, e) => {
     world.opened.push({ id: e.id, title: e.title })
@@ -885,6 +899,16 @@ describe('workbench', () => {
     expect(lists()).toBe(2)
   })
 
+  test('session.start runs whole: no hook fails, no tool registers', async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const world = seat(on)
+
+    await $.session.start(SESSION)
+    expect(world.tools).toEqual([])
+    expect(world.logs.filter(one => one.text.includes('failed'))).toEqual([])
+  })
+
   test('a refused command name skips only that command: the others register and the session writes its presence', async ($, on) => {
     mock.clock(on, { now: NOW })
 
@@ -1090,16 +1114,10 @@ describe('timeline page', () => {
   test('a page whose data cannot be read draws ✗ and why under the page buttons; the other pages still work', { options: { language: 'zh-CN' } }, async ($, on) => {
     mock.clock(on, { now: NOW })
 
-    const logs: { text: string; to: string }[] = []
     let isBroken = false
 
-    seat(on)
+    const { logs } = seat(on)
     on('state.get', ($, e, next) => (isBroken && (e as { key: string }).key === 'timeline' ? ({ deny: 'timeline unreadable' } as never) : next(e)))
-    on('ui.log', ($, e) => {
-      logs.push({ text: e.text, to: e.to })
-
-      return { value: undefined }
-    })
     await $.session.start(SESSION)
     await $.command.run(command('timeline'))
 
@@ -2858,58 +2876,17 @@ describe('context under the prompt', () => {
     expect(world.hints.at(-1)?.tail).toBe('Context 85k/200k · 41% · 7d 50% · resets in 3d0h')
   })
 
-  test('a window at 80% or more goes on the band in the warning color, once per crossing: back only after the window resets', { options: { language: 'zh-CN' } }, async ($, on) => {
-    mock.clock(on, { now: NOW })
-    seat(on)
-    await $.session.start(SESSION)
-    await measure($, { rateLimits: [{ ...FIVE_HOUR, percentUsed: 79.5 }] })
-    expect(linesOf(await $.ui.render(BAND)), 'under 80%').toEqual(IDLE)
-
-    await measure($, { rateLimits: [{ ...FIVE_HOUR, percentUsed: 81 }, SEVEN_DAY] })
-
-    const drawn = await $.ui.render(BAND)
-
-    expect(linesOf(drawn)).toEqual(['~ 额度 5h 81% · 2h10m后重置', 'engine band'])
-    expect(colorsOf(drawn, '~ 额度')).toEqual(['warning'])
-
-    await measure($, { rateLimits: [{ ...FIVE_HOUR, percentUsed: 85 }, SEVEN_DAY] })
-    expect(linesOf(await $.ui.render(BAND)), 'a point more is the same line').toEqual(['~ 额度 5h 85% · 2h10m后重置', 'engine band'])
-
-    await measure($, { rateLimits: [SEVEN_DAY] })
-    expect(linesOf(await $.ui.render(BAND)), 'the window left the readings').toEqual(IDLE)
-
-    await measure($, { rateLimits: [{ ...FIVE_HOUR, percentUsed: 86 }, SEVEN_DAY] })
-    expect(linesOf(await $.ui.render(BAND)), 'the same crossing does not come back').toEqual(IDLE)
-
-    await measure($, { rateLimits: [{ ...FIVE_HOUR, percentUsed: 82, resetsAt: at(5 * HOUR) }, SEVEN_DAY] })
-    expect(linesOf(await $.ui.render(BAND)), 'the window reset and crossed again').toEqual(['~ 额度 5h 82% · 5h00m后重置', 'engine band'])
-  })
-
-  test('idle-limit-seconds-stale: under an hour the reset reads in whole minutes, as often as the band wakes', { options: { language: 'zh-CN' } }, async ($, on) => {
+  test('a window at 80% or more shows only under the prompt, not on the band', { options: { language: 'zh-CN' } }, async ($, on) => {
     mock.clock(on, { now: NOW })
 
-    seat(on)
-    await $.session.start(SESSION)
-    await measure($, { rateLimits: [{ ...FIVE_HOUR, percentUsed: 81, resetsAt: at(45 * 60_000 + 30_000) }] })
+    const world = seat(on)
 
-    expect(linesOf(await $.ui.render(BAND))).toEqual(['~ 额度 5h 81% · 45m后重置', 'engine band'])
-  })
-
-  test('a rate-limit line alone on the band counts its reset down a minute at a time', { options: { language: 'zh-CN' } }, async ($, on) => {
-    const clock = mock.clock(on, { now: NOW })
-
-    seat(on)
     await $.session.start(SESSION)
     await measure($, { rateLimits: [{ ...FIVE_HOUR, percentUsed: 81 }] })
+    expect(linesOf(await $.ui.render(BAND))).toEqual(IDLE)
 
-    const band = await $.ui.mount({ plugin: PLUGIN, ...BAND } as never)
-
-    expect(linesOf(await band.drawn())).toEqual(['~ 额度 5h 81% · 2h10m后重置', 'engine band'])
-    await clock.advance(1_000)
-    expect(linesOf(await band.drawn()), 'just past a whole minute left').toEqual(['~ 额度 5h 81% · 2h09m后重置', 'engine band'])
-    await clock.advance(60_000)
-    expect(linesOf(await band.drawn())).toEqual(['~ 额度 5h 81% · 2h08m后重置', 'engine band'])
-    await band.unmount()
+    await $.ui.render(hintOf('terminal'))
+    expect(world.hints.at(-1)?.tail).toBe('上下文 —/200k · 5h 81% · 2h10m后重置')
   })
 })
 
@@ -3422,16 +3399,8 @@ describe('state an older build left', () => {
 
   test('without the shape tag reads as the initial value, one debug line per key; nothing throws and the next write is whole', { options: { language: 'zh-CN', gpuHosts: 'lab-box' } }, async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
-    const logs: string[] = []
-
-    seat(on, mmruns())
-    on('ui.log', ($, e) => {
-      if (e.to === 'debug') {
-        logs.push(e.text)
-      }
-
-      return { value: undefined }
-    })
+    const world = seat(on, mmruns())
+    const debug = () => world.logs.filter(one => one.to === 'debug').map(one => one.text)
 
     // Kept from before this load until the plugin writes the key.
     const kept = new Map(Object.entries(OLD))
@@ -3466,11 +3435,11 @@ describe('state an older build left', () => {
     await clock.advance(5_000)
 
     for (const key of ['agents', 'runs', 'gates', 'peers', 'presence', 'timeline']) {
-      expect(logs.filter(line => line.includes(`kept ${key} `)), key).toHaveLength(1)
+      expect(debug().filter(line => line.includes(`kept ${key} `)), key).toHaveLength(1)
     }
 
     // toasted is read by the peers poll alone, from its timer: that the poll ran clean is its check.
-    expect(logs.filter(line => line.includes('poll failed'))).toEqual([])
+    expect(debug().filter(line => line.includes('poll failed'))).toEqual([])
   })
 })
 

@@ -1,6 +1,6 @@
 # claude-utopia
 
-> **Work in progress.** Interfaces, names and defaults may change between versions. If this looks useful, star the repo to follow along.
+> **Under active development.** This repo is updated continuously, and interfaces, names and defaults can change between versions. Star or watch the repo to follow the changes.
 
 [简体中文](README.zh-CN.md)
 
@@ -8,11 +8,23 @@ Four Claude Code plugins built on [mods](https://code.claude.com/docs/en/plugins
 
 | Plugin | What it does |
 |---|---|
-| `dashboard` | A status band above the prompt for running subagents and mmrun reviews, and a context-usage hint, and a seven-page workbench (Overview / Agents / Reviews / GPU / Timeline / Usage / Progress) opened with `/dashboard`, `/subagents`, `/mmrun`, `/gpu`, `/timeline`. The Reviews, GPU and Progress tabs show once they have data: an `~/.claude/mmruns` folder, a GPU host, a progress board. The Timeline page draws the main loop's turns as a waterfall of model requests and tool calls, with a hotspot view of the slowest tools and turns. Renders subagent cards, test summaries and blocked-command notices in the transcript. |
+| `dashboard` | A status band above the prompt for running subagents and mmrun reviews, a line under the prompt with context use and the tightest rate-limit window, and a seven-page workbench (Overview / Agents / Reviews / GPU / Timeline / Usage / Progress) opened with `/dashboard`, `/subagents`, `/mmrun`, `/gpu`, `/timeline`. The Reviews, GPU and Progress tabs show once they have data: an `~/.claude/mmruns` folder, a GPU host, a progress board. The Timeline page draws the main loop's turns as a waterfall of model requests and tool calls, with a hotspot view of the slowest tools and turns. Renders subagent cards, test summaries and blocked-command notices in the transcript. |
 | `harness` | Skills: `ai-code-cleanup`, `interrogate`, `shape-task`, `verify-change`, `setup`. Guards: refuse subagents on blocked models, refuse git commands that discard uncommitted work in the shared main worktree, refuse tool calls that would print API-key config files (`~/.claude.json` and its backups, Claude settings, Codex config and auth, grok auth, OpenViking config) or an environment dump (`env`, `printenv`, `export -p`, `set`, …) into the transcript, run `/compact` when the main thread idles until the prompt cache is about to expire. |
 | `mm` | Cross-model code review and delegation: `/mm:review` runs codex / grok / agy in parallel as read-only reviewers, `/mm:run` hands a task to another model in its own worktree. Ships the `mmrun` CLI. A guard refuses reading mmrun's `*.raw` event streams (except a lone `tail` of 50 lines or fewer) and moves a foreground `mmrun wait` to the background. |
-| `progress` | A per-project progress board. Before its final reply, the main model records the conversation's work as 1–3 nodes (title, summary, status, kind, links to earlier nodes) through the `progress` tool, kept under `~/.claude/progress/` or committed with the project, as you choose once per project. An optional Artifact canvas mirrors the board. Works without `dashboard`; with it, the workbench's Progress page lists the board. |
+| `progress` | A per-project progress board. After each turn you typed that changed files or made a commit, the plugin asks Sonnet to record the work as 1–3 nodes (title, summary, status, kind, links to earlier nodes); the main model spends no tokens on it. The board is kept under `~/.claude/progress/` or committed with the project, as you choose once per project. The plugin mirrors the board to an optional Artifact canvas. Works without `dashboard`; with it, the workbench's Progress page lists the board. |
 | `agents/` | `worker` and `researcher` subagent templates to copy into `~/.claude/agents/`. |
+
+## Screenshots
+
+The status band above the prompt while a worker subagent runs, with the transcript cards for the dispatched agent and the test summary. Context use and the rate-limit window show only in the line under the prompt:
+
+![Status band and transcript cards in the terminal](docs/images/band-en.png)
+
+The workbench's Timeline page: each model request of the last turn, its tool calls and the critical path.
+
+![Workbench Timeline page in the terminal](docs/images/timeline-en.png)
+
+Both screenshots come from a real terminal session with `language` set to English. With `zh-CN`, the same UI is drawn in Chinese; see [简体中文](README.zh-CN.md#截图).
 
 ## Requirements
 
@@ -68,7 +80,7 @@ Set with `/plugin configure <plugin>@claude-utopia`, or `claude plugin configure
 | dashboard | `askSound` | `false` | Play a short chime with the toast of another session asking a permission or failing. Needs `toastPeerAsks`. |
 | dashboard | `toastRuns` | `true` | Toast when an mmrun model returns, fails or goes stale. |
 | harness | `language` | `auto` | Same as above, for the harness toast. |
-| harness | `blockedSubagentModels` | `sonnet` | Comma-separated; a subagent whose model name contains any entry is refused. Empty allows all. |
+| harness | `blockedSubagentModels` | empty | Comma-separated; a subagent whose model name contains any entry is refused. Empty allows all. |
 | harness | `sharedTreeGitGuard` | `true` | In the main worktree, refuse git commands that discard uncommitted changes or rewrite HEAD: `checkout <path>`, `checkout --force` / `-f`, `restore` (except `--staged` alone), `stash` (except `list`, `show`, `create`), `clean` (except `-n` / `--dry-run`), `switch --discard-changes` / `--force` / `-f`, `reset --hard`, `commit --amend`. Linked worktrees are exempt. |
 | harness | `idleCompact` | `true` | When the main thread sits idle until just before the prompt cache expires, run `/compact` automatically: with a 1h cache 10 minutes before, at 100k tokens or more; with a 5m cache 1 minute before, at 200k or more. The TTL is read from the transcript. |
 | mm | `reviewModels` | `codex,grok` | Models `/mm:review` uses when no `--models` is given. |

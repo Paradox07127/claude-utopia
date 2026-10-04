@@ -8,6 +8,8 @@ const PLUGIN = 'dashboard'
 const NOW = 1_790_922_800_000
 const SESSION: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: '/work' }
 const BOTTOM = { type: 'Text', props: {}, children: ['engine'] }
+// Core's own drawing of a question dialog: AskUserQuestion is drawn by exactly one engine node.
+const ENGINE_DIALOG = { type: 'engine', ref: 0 }
 // The main worktree's root, as `$.session.repo()` gives it from a linked worktree.
 const DIR = '/h/.claude/dashboard/usage/-r'
 const ZH = { options: { language: 'zh-CN' } }
@@ -85,6 +87,7 @@ function seat(on: On): World {
 
     return { value: undefined }
   })
+  on('ui.render', { component: 'AskUserQuestion' }, () => ENGINE_DIALOG as never)
   on('ui.render', () => BOTTOM as never)
 
   return world
@@ -121,6 +124,23 @@ const answered = ($: Engine, id: string, questions: unknown[], answers: Record<s
   } as never)
 
 const NO_ASKS = { dialogs: 0, questions: 0, recommended: 0, option: 0, typed: 0, declined: 0, under1m: 0, under2m: 0, under5m: 0, under10m: 0, over10m: 0 }
+
+/** The dialog of an AskUserQuestion call as the terminal draws it. */
+const dialogOf = (questions: unknown[]) =>
+  ({ plugin: PLUGIN, surface: 'terminal', component: 'AskUserQuestion', requestId: 'toolu_q', viewport: { columns: 100, rows: 40 }, props: { tool: 'AskUserQuestion', questions } }) as never
+
+/** Every `$.ui.log` line. */
+function logsOf(on: On): string[] {
+  const lines: string[] = []
+
+  on('ui.log', ($, e) => {
+    lines.push(e.text)
+
+    return { value: undefined }
+  })
+
+  return lines
+}
 
 /** Every string a drawn tree holds, one per Text directly under a Box. */
 function linesOf(node: unknown): string[] {
@@ -342,6 +362,91 @@ describe('question dialogs', () => {
 
     expect(world.toasts).toEqual(['还在等你回答问题'])
     expect(world.clips).toBe(1)
+  })
+
+  test('the use-recommended button pressed while the dialog waits answers each question with its recommended option; the ledger counts them recommended', ZH, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const world = seat(on)
+    const logs = logsOf(on)
+    const two = [question('Which way?', ['Bold (Recommended)', 'Careful']), question('Which lib?', ['dayjs', 'luxon (Recommended)'])]
+    let isClosed = false
+
+    // The dialog beneath: open until a hook above settles the call.
+    on('tool.call', { tool: 'AskUserQuestion' }, ($, e, next) =>
+      new Promise(resolve =>
+        next.signal.addEventListener('abort', () => {
+          isClosed = true
+          resolve({ deny: 'closed' })
+        }),
+      ) as never,
+    )
+
+    await $.session.start(SESSION)
+
+    const call = $.tool.call({ tool: 'AskUserQuestion', questions: two } as never)
+
+    await shown($, two)
+
+    const dialog = await $.ui.mount(dialogOf(two))
+
+    await dialog.press({ key: 'ask-recommended' })
+
+    expect(await call).toEqual({ result: { questions: two, answers: { 'Which way?': 'Bold (Recommended)', 'Which lib?': 'luxon (Recommended)' } }, context: [expect.stringContaining('use-recommended button')] })
+    expect(isClosed, 'the dialog beneath is closed').toBe(true)
+    expect(logs).toContain('ask: answered with the recommended options')
+
+    // The closed dialog may still report itself interrupted: the answer already counted stands.
+    await $.classic.PostToolUseFailure({ tool_name: 'AskUserQuestion', tool_input: { questions: two }, tool_use_id: 'toolu_q', error: 'interrupted', is_interrupt: true } as never)
+    await end($, 'sa')
+
+    expect(fileOf(world, 'sa')?.asks).toEqual({ ...NO_ASKS, dialogs: 1, questions: 2, recommended: 2, under1m: 1 })
+    await dialog.unmount()
+  })
+
+  test('a dialog answered first passes its result through unchanged; a later press does nothing', ZH, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    seat(on)
+
+    const logs = logsOf(on)
+    const one = [question('Go?', ['yes (Recommended)', 'no'])]
+    const typed = { result: { questions: one, answers: { 'Go?': 'not yet' } }, text: 'User answered: not yet' }
+    let answer: (result: unknown) => void = () => undefined
+
+    on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(resolve => (answer = resolve)) as never)
+    await $.session.start(SESSION)
+
+    const call = $.tool.call({ tool: 'AskUserQuestion', questions: one } as never)
+    const dialog = await $.ui.mount(dialogOf(one))
+
+    answer(typed)
+
+    expect(await call).toEqual(typed)
+    await dialog.press({ key: 'ask-recommended' })
+    expect(logs).toEqual([])
+    await dialog.unmount()
+  })
+
+  test('the button shows only when every question has exactly one recommended option', ZH, async ($, on) => {
+    seat(on)
+
+    const scenes: [string, unknown[], boolean][] = [
+      ['all recommended', [question('A?', ['x (Recommended)', 'y']), question('B?', ['p', 'q (Recommended)'])], true],
+      ['one without', [question('A?', ['x (Recommended)', 'y']), question('B?', ['p', 'q'])], false],
+      ['one with two', [question('A?', ['x (Recommended)', 'y (Recommended)'])], false],
+    ]
+
+    for (const [where, questions, isDrawn] of scenes) {
+      const dialog = await $.ui.mount(dialogOf(questions))
+
+      expect((await dialog.find({ key: 'ask-recommended' })) !== undefined, where).toBe(isDrawn)
+
+      if (!isDrawn) {
+        expect(await dialog.drawn(), `${where}: the engine's dialog alone`).toEqual(ENGINE_DIALOG)
+      }
+
+      await dialog.unmount()
+    }
   })
 })
 

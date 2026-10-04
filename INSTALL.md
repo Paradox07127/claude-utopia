@@ -25,9 +25,9 @@ If `git`, `jq` or `python3` is missing, tell the user which plugin needs it and 
 
 Ask these in one message, with the defaults shown, and accept "defaults" as an answer:
 
-1. Which plugins to install: `dashboard`, `harness`, `mm`, `progress` (default: all four). `progress` is a per-project board on which the main model records each conversation's work; it has no options.
+1. Which plugins to install: `dashboard`, `harness`, `mm`, `progress` (default: all four). `progress` is a per-project board; after each typed turn that changed files or made a commit, a Sonnet completion records the work; it has no options.
 2. UI language for `dashboard` and `harness`: `auto` (follow Claude Code's language setting and the system locale), `zh-CN` or `en` (default `auto`).
-3. `harness`: model names to refuse for subagents, comma-separated (default `sonnet`; empty allows all); whether to guard the shared main worktree against git commands that discard uncommitted work (default yes); whether to run `/compact` automatically when the main thread idles until just before the prompt cache expires (1h cache: 10 minutes before, at 100k tokens or more; 5m cache: 1 minute before, at 200k or more; the TTL is read from the transcript) (default yes).
+3. `harness`: model names to refuse for subagents, comma-separated (default empty, which allows all); whether to guard the shared main worktree against git commands that discard uncommitted work (default yes); whether to run `/compact` automatically when the main thread idles until just before the prompt cache expires (1h cache: 10 minutes before, at 100k tokens or more; 5m cache: 1 minute before, at 200k or more; the TTL is read from the transcript) (default yes).
 4. `mm`: models `/mm:review` uses by default, from the usable CLIs found in step 1 (suggest `codex,grok`, minus any that are missing or unusable).
 5. `dashboard`: ssh host names with GPUs to watch, comma-separated (default none); the fallback prompt cache TTL in minutes, after which the band warns that the next message rewrites the prompt cache, used only until the real TTL is known (default `60`); whether to toast when another Claude Code session asks a permission or its turn fails (default yes), when another session replies after a turn of two minutes or more (default yes), and when an mmrun model returns, fails or goes stale (default yes); whether to play a short chime with the toast of another session asking or failing (default no; needs that toast on).
 6. Whether to install the `worker` and `researcher` agent templates into `~/.claude/agents/` (default no). Mention that with them installed, `harness` hides the built-in `general-purpose` agent.
@@ -48,10 +48,10 @@ Each install prints that some userConfig options are not set yet; step 4 handles
 
 ## 4. Configure
 
-The defaults are: `language` `auto`; `blockedSubagentModels` `sonnet`; `sharedTreeGitGuard` `true`; `idleCompact` `true`; `reviewModels` `codex,grok`; `gpuHosts` empty; `cacheTtlMinutes` `60`; `toastPeerAsks` `true`; `toastPeerReplies` `true`; `toastRuns` `true`; `askSound` `false`. Write every value that differs from these defaults (so if the user's `reviewModels` is not exactly `codex,grok`, write it). Values are passed as a JSON object whose values are all strings, including booleans and numbers. Examples:
+The defaults are: `language` `auto`; `blockedSubagentModels` empty; `sharedTreeGitGuard` `true`; `idleCompact` `true`; `reviewModels` `codex,grok`; `gpuHosts` empty; `cacheTtlMinutes` `60`; `toastPeerAsks` `true`; `toastPeerReplies` `true`; `toastRuns` `true`; `askSound` `false`. Write every value that differs from these defaults (so if the user's `reviewModels` is not exactly `codex,grok`, write it). Values are passed as a JSON object whose values are all strings, including booleans and numbers. Examples:
 
 ```bash
-echo '{"language":"zh-CN","blockedSubagentModels":"","sharedTreeGitGuard":"false"}' | claude plugin configure harness@claude-utopia --values-stdin
+echo '{"language":"zh-CN","blockedSubagentModels":"sonnet","sharedTreeGitGuard":"false"}' | claude plugin configure harness@claude-utopia --values-stdin
 ```
 
 ```bash
@@ -93,7 +93,7 @@ Then tell the user to start a new Claude Code session so the plugins and options
 - `dashboard`: `/dashboard` opens the workbench.
 - `harness`: `/harness:setup` is listed in the `/` menu.
 - `mm`: `mmrun` with no arguments prints its usage from the Bash tool.
-- `progress`: asked to call the `progress` tool with `list: true`, Claude gets an answer; in a project with no board yet, it is the question of where to keep the board.
+- `progress`: in a project with no board yet, the first typed turn that edits a file ends with a question of where to keep the board.
 
 ## Changing settings later
 

@@ -1,6 +1,6 @@
 import type { SessionRateLimit } from 'claude-code'
 
-import type { AgentRun, AgentUsage, AskCounts, BoardNode, BoardRead, BoardStatus, DashSeen, DashUsage, GateRun, MmModel, MmRun, MmSnapshot, SessionPresence, UsageCounts, WorktreeInfo } from '../types'
+import type { AgentRun, AgentUsage, AskCounts, BoardNode, BoardRead, BoardStatus, DashSeen, GateRun, MmModel, MmRun, MmSnapshot, SessionPresence, UsageCounts, WorktreeInfo } from '../types'
 import { bandText, elapsedOf, fit, fmtDuration, fmtTokens, glyphOf, widthOf } from './agent-model'
 import { t } from './i18n'
 import { elapsedSecs, fmtRunTokens, fmtSecs, isFailedModel, runLabel } from './runs'
@@ -26,12 +26,7 @@ export const LONG_TURN_MS = 120_000
 /** A session replied this long ago counts as idle: left open, not waiting on the person. */
 export const REPLIED_STALE_MS = 30 * 60_000
 const PEER_TITLE_COLUMNS = 40
-/** A rate-limit window used this much or more goes on the band. */
-export const LIMIT_WARN_PERCENT = 80
-/** Rate-limit crossings whose band line ended, kept so they do not come back. */
-const LIMITS_KEPT = 20
 const DAY_MS = 86_400_000
-const MINUTE_MS = 60_000
 /** Other sessions' states kept as seen, so one back from silence does not toast again. */
 const PEER_TOAST_KEYS = 200
 // Band agent rows: the type column at most this wide, the time column this wide, a last tool kept this wide before the tool columns go.
@@ -41,7 +36,6 @@ const LAST_TOOL_COLUMNS = 12
 // Group ids; groupWord turns them into the band's words.
 const SESSIONS_GROUP = 'sessions'
 export const CACHE_GROUP = 'cache'
-export const LIMITS_GROUP = 'limits'
 const GATES_GROUP = 'gates'
 
 const ERROR = 'error'
@@ -259,10 +253,8 @@ function cacheLine(cold: ColdCache): Line {
 
 const LIMIT_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
 
-const limitKey = (limit: SessionRateLimit) => `${limit.kind}@${limit.resetsAt ?? ''}`
-
 /** `2h10m`, `3d4h` past a day. */
-// Whole minutes under an hour: the band wakes only as a minute passes (nextBandChange), so seconds would stand still.
+// Whole minutes under an hour: nothing redraws the hint each second, so seconds would stand still.
 const fmtReset = (ms: number) =>
   ms < 60_000 ? '<1m' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m` : ms < DAY_MS ? fmtDuration(ms) : `${Math.floor(ms / DAY_MS)}d${Math.floor((ms % DAY_MS) / 3_600_000)}h`
 
@@ -274,41 +266,16 @@ export function limitText(limit: SessionRateLimit, now: number): string {
   return Number.isNaN(resetsAt) ? name : `${name} · ${t().limitReset(fmtReset(Math.max(0, resetsAt - now)))}`
 }
 
-/** The windows the band warns of: used LIMIT_WARN_PERCENT or more, their crossing's line not ended before. */
-export const warnedLimits = (usage: DashUsage) => usage.rateLimits.filter(limit => limit.percentUsed >= LIMIT_WARN_PERCENT && !usage.limitsGone.includes(limitKey(limit)))
-
-/** `limitsGone` once a measurement gave `rateLimits`: a window warned of that is under the mark now, or not read, ends its crossing's line until it resets. */
-export function goneLimits(was: DashUsage, rateLimits: readonly SessionRateLimit[]): string[] {
-  const warned = new Set(rateLimits.filter(limit => limit.percentUsed >= LIMIT_WARN_PERCENT).map(limitKey))
-  const ended = warnedLimits(was)
-    .map(limitKey)
-    .filter(key => !warned.has(key))
-
-  return ended.length === 0 ? was.limitsGone : [...was.limitsGone, ...ended].slice(-LIMITS_KEPT)
-}
-
-/** `~ limit 5h 82% · resets in 2h10m`. */
-function limitLine(limit: SessionRateLimit, now: number): Line {
-  return [{ text: t().limitWarn, color: WARNING }, { text: ` ${limitText(limit, now)}` }]
-}
-
-/** When the band's pending gates or limit countdowns next change with time alone: a gate's expiry, a countdown's next minute; null when none will. */
-export function nextBandChange(gates: readonly GateRun[], limits: readonly SessionRateLimit[], now: number, trees: readonly WorktreeInfo[] | null = null): number | null {
-  const times = [
-    ...pendingGates(gates, now, trees).map(gate => gate.at + GATE_PENDING_MS),
-    // A countdown drops a minute 1 ms past each whole minute left.
-    ...limits
-      .map(limit => Date.parse(limit.resetsAt ?? '') - now)
-      .filter(left => left > 0)
-      .map(left => now + (left % MINUTE_MS) + 1),
-  ]
+/** When the band's pending gates next change with time alone: a gate's expiry; null when none will. */
+export function nextBandChange(gates: readonly GateRun[], now: number, trees: readonly WorktreeInfo[] | null = null): number | null {
+  const times = pendingGates(gates, now, trees).map(gate => gate.at + GATE_PENDING_MS)
 
   return times.length === 0 ? null : Math.min(...times)
 }
 
 /**
  * What the band and the overview draw from; `peers` are the other sessions, `cold` this one's cold prompt cache, `flights` the agents' calls still running,
- * `limits` the rate-limit windows warnedLimits gives, `trees` the worktrees pendingGates keeps gates of.
+ * `trees` the worktrees pendingGates keeps gates of. Rate limits are not drawn here: only PromptHint shows them.
  */
 export function boardOf(
   agents: readonly AgentRun[],
@@ -319,7 +286,6 @@ export function boardOf(
   peers: readonly SessionPresence[] = [],
   cold: ColdCache | null = null,
   flights: ReadonlyMap<string, Flight> = new Map(),
-  limits: readonly SessionRateLimit[] = [],
   trees: readonly WorktreeInfo[] | null = null,
 ): Board {
   const entries: Entry[] = []
@@ -392,17 +358,11 @@ export function boardOf(
 
   entries.sort((a, b) => a.tier - b.tier || a.startedAt - b.startedAt)
 
-  // Counted in no bucket nor tier: it is no work item, only a heads-up, so it comes last and is the first group dropped; so do the rate limits.
+  // Counted in no bucket nor tier: it is no work item, only a heads-up, so it comes last and is the first group dropped.
   if (cold !== null) {
     const line = cacheLine(cold)
 
     entries.push({ tier: 2, startedAt: now - cold.idleMs, group: CACHE_GROUP, full: line, compact: line, counts: noCounts() })
-  }
-
-  for (const limit of limits) {
-    const line = limitLine(limit, now)
-
-    entries.push({ tier: 2, startedAt: now, group: LIMITS_GROUP, full: line, compact: line, counts: noCounts() })
   }
 
   return { entries, counts, peers: tally, now }
@@ -429,7 +389,7 @@ function summaryLine(counts: Counts, waiting: number, columns: number): Line {
 }
 
 const groupWord = (group: string) =>
-  group === SESSIONS_GROUP ? t().sessionsGroup : group === CACHE_GROUP ? t().cacheGroup : group === LIMITS_GROUP ? t().limitsGroup : group === GATES_GROUP ? t().gatesGroup : group
+  group === SESSIONS_GROUP ? t().sessionsGroup : group === CACHE_GROUP ? t().cacheGroup : group === GATES_GROUP ? t().gatesGroup : group
 
 /** `agents ✗1 ●2 ✓1 ⊘1` per group, in the order its first entry comes, with the color of its worst tier; other sessions as `sessions ✗1 !1 ●2 ?1`. */
 function groupLines(entries: readonly Entry[], peers: PeerCounts): { line: Line; color: string }[] {
@@ -464,7 +424,7 @@ function groupLines(entries: readonly Entry[], peers: PeerCounts): { line: Line;
       }
     }
 
-    if (group === CACHE_GROUP || group === LIMITS_GROUP) {
+    if (group === CACHE_GROUP) {
       line.push({ text: ' ' }, { text: '~', color: WARNING })
       color ??= WARNING
     }

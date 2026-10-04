@@ -225,7 +225,7 @@ with tempfile.TemporaryDirectory() as tmp:
     for path in [f"{home}/.claude.json", f"{home}/.claude/settings.json", f"{home}/.claude.json.backup",
                  f"{home}/.claude/backups/x.json", f"{home}/.codex/config.toml", f"{proj}/link.json",
                  "~/.claude/settings.local.json", "$HOME/.codex/config.toml.bak", "${HOME}/.codex/auth.json",
-                 f"{home}/.openviking/x", f"{home}/.grok/auth.json", ".claude.json", "/srv/ov/ovcli.conf", "ov.conf"]:
+                 f"{home}/.openviking/x", f"{home}/.grok/auth.json", f"{home}/.claude/file-history/s/a@v1", f"{home}/.codex/shell_snapshots/a.sh", ".claude.json", "/srv/ov/ovcli.conf", "ov.conf"]:
         expect(f"secret 拦 Read [{path}]", secret("Read", {"file_path": path})[0], 2)
     for tool in ["Edit", "MultiEdit", "Write"]:
         expect(f"secret 拦 {tool} ~/.claude/settings.json", secret(tool, {"file_path": f"{home}/.claude/settings.json"})[0], 2)
@@ -246,16 +246,20 @@ with tempfile.TemporaryDirectory() as tmp:
                 f"python3 - <<'EOF'\nprint(open('{home}/.claude.json').read())\nEOF",
                 "diff $HOME/.claude/settings.json /tmp/x", "grep token ~/.codex/config.toml", "rg -n key ~/.openviking/", "rg -L key ~/.codex/", "grep -rn token ~/.codex", "grep -R key $HOME",
                 "sudo -n tail ~/.grok/auth.json", "X=1 less ~/.claude/settings.local.json", "echo \"$(cat ~/.claude.json)\"",
-                "cp ~/.claude/backups/a.json /tmp/", "cat ov.conf", "env", "env | sort", "env -0", "printenv",
+                "cp ~/.claude/backups/a.json /tmp/", "cat ov.conf", "cat ~/.codex/shell_snapshots/a.sh", "rg KEY ~/.claude/file-history", "env", "env | sort", "env -0", "printenv",
                 "printenv OPENVIKING_API_KEY", "printenv GH_TOKEN", "export", "export -p", "declare -x", "declare -p",
-                "typeset -x", "set", "true; set"]:
+                "typeset -x", "set", "true; set", "cat <<'EOF' | bash\ncat ~/.claude.json\nEOF",
+                "cat <<EOF\n$(cat ~/.claude.json)\nEOF", "gh pr create --title t --body-file ~/.codex/config.toml"]:
         expect(f"secret 拦 Bash [{cmd.splitlines()[0]}]", sh(cmd), 2)
     for cmd in ["stat ~/.claude.json", "grep -c token ~/.codex/config.toml", "ls -la ~/.openviking",
                 "chmod 600 ~/.claude/settings.json", "env -i PATH=/usr/bin ls", "printenv HOME", "cat README.md",
                 'git commit -m "docs: mention settings.json"', "cat prov.conf", "grep -l key ~/.claude.json",
                 "rg --files-with-matches key ~/.codex/", "grep -qi token ~/.codex/auth.json", "wc -c ~/.claude.json",
-                "test -f ~/.codex/auth.json && echo yes", "env FOO=1 ls", "grep -rn todo ~/proj", "grep -rl token ~/.codex", "set -e", "export A=1", "declare -x A=1"]:
-        expect(f"secret 放行 Bash [{cmd}]", sh(cmd), 0)
+                "test -f ~/.codex/auth.json && echo yes", "env FOO=1 ls", "grep -rn todo ~/proj", "grep -rl token ~/.codex", "set -e", "export A=1", "declare -x A=1",
+                "git commit -m \"$(cat <<'EOF'\ndocs: explain the hook in ~/.claude/settings.json\nEOF\n)\"",
+                "cat > docs/setup.md <<'EOF'\nAdd the hook to ~/.claude/settings.json\nEOF",
+                "gh pr create --title t --body 'Reads ~/.codex/config.toml only via stat'"]:
+        expect(f"secret 放行 Bash [{cmd.splitlines()[0]}]", sh(cmd), 0)
 
     code, _, err = secret("Read", {"file_path": f"{home}/.claude.json"})
     expect("secret 拒绝原因说明文件和替代做法", (code, "API keys" in err, ".claude.json" in err, "Grep tool" in err),

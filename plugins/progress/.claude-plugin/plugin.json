@@ -1,6 +1,6 @@
 {
   "name": "progress",
   "version": "0.1.0",
-  "description": "A per-project progress board: the main model records each conversation's work as nodes through the progress tool, kept under ~/.claude/progress/ or committed with the project; an optional Artifact canvas mirrors it",
+  "description": "A per-project progress board: after each typed turn that edited files or made a commit, the plugin records its work as nodes through a Sonnet completion, kept under ~/.claude/progress/ or committed with the project; the plugin mirrors it to an optional Artifact canvas",
   "author": { "name": "Paradox07127" }
 }

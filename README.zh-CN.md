@@ -1,6 +1,6 @@
 # claude-utopia
 
-> **开发中（Work in progress）。** 接口、名字和默认值在版本之间可能变化。觉得有用的话可以先点个 star，关注后续开发。
+> **持续开发中。** 本仓库实时更新，接口、名字和默认值在版本之间可能变化。点 star 或 watch 关注后续改动。
 
 [English](README.md)
 
@@ -8,11 +8,23 @@
 
 | 插件 | 做什么 |
 |---|---|
-| `dashboard` | 输入框上方的状态条，显示运行中的子 agent 和 mmrun 外审；上下文用量提示；七页工作台（总览 / Agents / 外审 / GPU / 时间线 / 用量 / 进度），用 `/dashboard`、`/subagents`、`/mmrun`、`/gpu`、`/timeline` 打开。外审、GPU、进度三个标签有数据时才显示：有 `~/.claude/mmruns` 目录、有 GPU 主机、有进度板。时间线页把主循环的每一轮画成模型请求和工具调用的瀑布图，另有热点视图列出最慢的工具和轮次。在对话里画子 agent 卡片、测试摘要和被拦命令的提示。 |
+| `dashboard` | 输入框上方的状态条，显示运行中的子 agent 和 mmrun 外审；输入框下方的一行，显示上下文用量和用得最多的额度窗口；七页工作台（总览 / Agents / 外审 / GPU / 时间线 / 用量 / 进度），用 `/dashboard`、`/subagents`、`/mmrun`、`/gpu`、`/timeline` 打开。外审、GPU、进度三个标签有数据时才显示：有 `~/.claude/mmruns` 目录、有 GPU 主机、有进度板。时间线页把主循环的每一轮画成模型请求和工具调用的瀑布图，另有热点视图列出最慢的工具和轮次。在对话里画子 agent 卡片、测试摘要和被拦命令的提示。 |
 | `harness` | skill：`ai-code-cleanup`、`interrogate`、`shape-task`、`verify-change`、`setup`。守卫：拒绝派指定模型的子 agent；在共享主工作树上拒绝会抹掉未提交改动的 git 命令；拒绝会把 API key 配置文件（`~/.claude.json` 及其备份、Claude 的设置、Codex 的配置与认证、grok 的认证、OpenViking 的配置）内容或环境变量全量输出（`env`、`printenv`、`export -p`、`set` 等）带进对话的工具调用；主线程空闲到 prompt 缓存将过期时自动 `/compact`。 |
 | `mm` | 多模型交叉审查与派活：`/mm:review` 让 codex / grok / agy 并行只读审查，`/mm:run` 把任务交给别的模型在独立工作树里做。自带 `mmrun` 命令行工具。守卫拒绝读取 mmrun 的 `*.raw` 事件流（单独一条不超过 50 行的 `tail` 除外），并把前台的 `mmrun wait` 改到后台运行。 |
-| `progress` | 按项目的进度板。主模型在回复结束前通过 `progress` 工具把这次对话的工作记成 1–3 个节点（标题、摘要、状态、类型，连到旧节点），存在 `~/.claude/progress/` 下或随项目提交，每个项目选一次。可选的 Artifact 画布同步显示进度板。不依赖 `dashboard`；装了 `dashboard` 时，工作台的进度页列出这块板。 |
+| `progress` | 按项目的进度板。你手打的 prompt 所在的那一轮改了文件或产生了 commit 后，插件让 Sonnet 把这轮的工作记成 1–3 个节点（标题、摘要、状态、类型，连到旧节点），主模型不花 token。进度板存在 `~/.claude/progress/` 下或随项目提交，每个项目选一次。插件把进度板同步到可选的 Artifact 画布。不依赖 `dashboard`；装了 `dashboard` 时，工作台的进度页列出这块板。 |
 | `agents/` | `worker` 与 `researcher` 子 agent 模板，复制到 `~/.claude/agents/` 使用。 |
+
+## 截图
+
+worker 子 agent 运行时输入框上方的状态条，以及对话里的「agent 已派出」卡片和测试摘要。上下文用量和额度只显示在输入框下方那一行：
+
+![终端里的状态条和对话卡片](docs/images/band-zh-CN.png)
+
+工作台的时间线页：上一轮的每个模型请求、它发起的工具调用和关键路径。
+
+![终端里的工作台时间线页](docs/images/timeline-zh-CN.png)
+
+两张截图都来自真实的终端会话，`language` 为 `zh-CN`。设成 `en` 时界面画成英文，见 [English](README.md#screenshots)。
 
 ## 依赖
 
@@ -68,7 +80,7 @@ claude plugin install progress@claude-utopia
 | dashboard | `askSound` | `false` | 别的会话请求权限或失败的 toast 弹出时，同时播放一声短提示音。需要 `toastPeerAsks` 开着。 |
 | dashboard | `toastRuns` | `true` | mmrun 的某个模型返回、失败或停滞时弹 toast。 |
 | harness | `language` | `auto` | 同上，用于 harness 的 toast。 |
-| harness | `blockedSubagentModels` | `sonnet` | 逗号分隔；模型名包含其中任一项的子 agent 会被拒绝。留空则不拦。 |
+| harness | `blockedSubagentModels` | 空 | 逗号分隔；模型名包含其中任一项的子 agent 会被拒绝。留空则不拦。 |
 | harness | `sharedTreeGitGuard` | `true` | 在主工作树上拒绝会抹掉未提交改动或改写 HEAD 的 git 命令：`checkout <路径>`、`checkout --force` / `-f`、`restore`（单独 `--staged` 除外）、`stash`（`list`、`show`、`create` 除外）、`clean`（`-n` / `--dry-run` 除外）、`switch --discard-changes` / `--force` / `-f`、`reset --hard`、`commit --amend`。linked worktree 里不拦。 |
 | harness | `idleCompact` | `true` | 主线程空闲到 prompt 缓存快过期时自动 `/compact`：1h 缓存在过期前 10 分钟、上下文不少于 100k token；5m 缓存在过期前 1 分钟、不少于 200k token。缓存时效从会话记录读取。 |
 | mm | `reviewModels` | `codex,grok` | `/mm:review` 没给 `--models` 时用的模型。 |

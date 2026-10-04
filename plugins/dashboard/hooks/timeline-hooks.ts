@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, HookFailure, On, Timer, TurnStepResult } from 'claude-code'
 
 import type { TimelineTurn, UsageDay, UsageLedger, UsageRead } from '../types'
+import { awaitPress, recommendedLabels } from './ask-recommended'
 import { attentionChime } from './chime'
 import { failureLine } from './failures'
 import { t } from './i18n'
@@ -17,6 +18,7 @@ const usageRead = atom({ plugin: 'dashboard', key: 'usageRead' } as const, null 
 const LEDGER_WRITE_MS = 5_000
 // A question dialog unanswered this long reminds the person once.
 const ASK_REMIND_MS = 180_000
+const ASK_PRESSED = 'The person pressed the use-recommended button above the question dialog: each question was answered with its option marked (Recommended).'
 
 // The ledger days changed since their files were last written, and the timer that writes them.
 let unwritten = new Set<string>()
@@ -275,6 +277,39 @@ export function registerTimeline(on: On): void {
     return r
   }).catch(($, e, next) => {
     hookFailed($, 'classic.PermissionRequest (asks)', next.error)
+
+    return next(e)
+  })
+
+  // The dialog races the use-recommended button (ask-recommended.tsx); returning while `next(e)` is pending aborts the dialog beneath.
+  on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
+    const labels = recommendedLabels(e.questions)
+
+    if (labels === null) {
+      return next(e)
+    }
+
+    const wait = awaitPress()
+
+    try {
+      const answered = await Promise.race([next(e), wait.pressed])
+
+      if (answered !== null) {
+        return answered
+      }
+
+      const result = { questions: e.questions, answers: Object.fromEntries(e.questions.map((one, i) => [one.question, labels[i]!])) }
+
+      $.ui.log('ask: answered with the recommended options', { to: 'debug' })
+      // The aborted dialog may report no result of its own: the ledger counts this one first.
+      await askEnded($, e.agentId, result)
+
+      return { result, context: [ASK_PRESSED] }
+    } finally {
+      wait.done()
+    }
+  }).catch(($, e, next) => {
+    hookFailed($, 'tool.call AskUserQuestion', next.error)
 
     return next(e)
   })

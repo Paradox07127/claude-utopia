@@ -34,7 +34,7 @@ Show the current value of every option in one table, then ask what to change. Ac
 | dashboard | `toastPeerReplies` | `true` / `false`: toast when another session replies after a turn of two minutes or more | `true` |
 | dashboard | `askSound` | `true` / `false`: chime with the toast of another session asking or failing; needs `toastPeerAsks` | `false` |
 | dashboard | `toastRuns` | `true` / `false`: toast when an mmrun model returns, fails or goes stale | `true` |
-| harness | `blockedSubagentModels` | comma-separated model names to refuse; empty allows all | `sonnet` |
+| harness | `blockedSubagentModels` | comma-separated model names to refuse; empty allows all | empty |
 | harness | `sharedTreeGitGuard` | `true` / `false` | `true` |
 | harness | `idleCompact` | `true` / `false` | `true` |
 | mm | `reviewModels` | comma-separated, from `codex`, `grok`, `agy` | `codex,grok` |
