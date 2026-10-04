@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""mmroom — participant protocol for mmrun --room. Reads and writes only files under $MMROOM_DIR.
+
+  mmroom post --round N --json '<entry>'   append to your own file ($MMROOM_SELF)
+  mmroom read [--round N] [--dropped]      print entries that pass validation (JSON lines, with from; not your own)
+  mmroom wait --round N [--timeout SECS]   wait until every other participant still present has posted round N claims, then print that round
+
+Entries: claim {"type":"claim","claim_id","stance":"new|maintain|revise|withdraw","claim","evidence","basis":"traced|ran|inferred"}
+         question to the main model {"type":"ask_host","text"}
+Identity = which file was written to, enforced by the sandbox; the env vars are only hints.
+"""
+import argparse, json, os, re, sys, time
+
+MAX_ROUND, MAX_BYTES, MAX_CLAIMS = 2, 2048, 3
+STANCES = {"new", "maintain", "revise", "withdraw"}
+BASES = {"traced", "ran", "inferred"}
+EVIDENCE = re.compile(r"[\w./-]+:\d+")
+CONTROL = ("host", "control")
+
+ROOM = os.environ.get("MMROOM_DIR", "")
+SELF = os.environ.get("MMROOM_SELF", "")
+ME = os.path.basename(SELF)[:-len(".jsonl")] if SELF.endswith(".jsonl") else ""
+
+
+def invalid(e):
+    """Why the entry is invalid; None if valid. The count limit is checked separately."""
+    if not isinstance(e, dict): return "format"
+    if len(json.dumps(e, ensure_ascii=False).encode()) > MAX_BYTES: return "over 2KB"
+    if not isinstance(e.get("round"), int) or isinstance(e.get("round"), bool) or e["round"] < 1: return "format"
+    if e.get("type") == "ask_host":
+        return None if isinstance(e.get("text"), str) and e["text"] else "format"
+    if e.get("type") != "claim": return "format"
+    if not all(isinstance(e.get(k), str) and e[k] for k in ("claim_id", "claim")) or not isinstance(e.get("evidence"), str):
+        return "format"
+    if e.get("stance") not in STANCES or e.get("basis") not in BASES: return "format"
+    if e["stance"] == "revise" and not (EVIDENCE.search(e["evidence"]) or re.search(r"(?m)^\$ ", e["evidence"])):
+        return "revise without evidence"
+    return None
+
+
+def check(lines):
+    """All lines of one participant file → [(entry, drop reason or None)]; per round only the first 3 claims in order are kept."""
+    out, per_round = [], {}
+    for line in lines:
+        if not line.strip(): continue
+        try: e = json.loads(line)
+        except ValueError: out.append((None, "not JSON")); continue
+        why = invalid(e)
+        if why is None and e["type"] == "claim":
+            n = per_round[e["round"]] = per_round.get(e["round"], 0) + 1
+            if n > MAX_CLAIMS: why = "more than 3 claims"
+        out.append((e, why))
+    return out
+
+
+def lines_of(name):
+    try:
+        with open(os.path.join(ROOM, name + ".jsonl"), encoding="utf-8", errors="replace") as f: return f.read().splitlines()
+    except OSError: return []
+
+
+def participants():
+    names = [f[:-6] for f in os.listdir(ROOM) if f.endswith(".jsonl") and f[:-6] not in CONTROL]
+    return sorted(names, key=lambda n: (int(n[1:]) if re.fullmatch(r"P\d+", n) else 1 << 30, n))
+
+
+def collect(rnd=None):
+    """→ (valid entries, drop records). host/control are written only by mmrun outside the sandbox and are not validated as claims."""
+    kept, dropped = [], []
+    for p in participants():
+        for e, why in check(lines_of(p)):
+            r = e.get("round") if isinstance(e, dict) else None
+            if why: dropped.append({"type": "dropped", "from": p, "round": r, "reason": why})
+            elif rnd is None or r == rnd: kept.append(dict(e, **{"from": p}))
+    for name in CONTROL:
+        for line in lines_of(name):
+            try: e = json.loads(line)
+            except ValueError: continue
+            if isinstance(e, dict) and (rnd is None or e.get("round", rnd) == rnd): kept.append(dict(e, **{"from": name}))
+    return kept, dropped
+
+
+def emit(entries):
+    for e in entries:
+        if e["from"] != ME: print(json.dumps(e, ensure_ascii=False))
+
+
+def cmd_post(a):
+    if not SELF: sys.exit("mmroom: MMROOM_SELF is not set")
+    try: e = json.loads(a.json)
+    except ValueError as x: sys.exit(f"mmroom: --json is not JSON: {x}")
+    if not isinstance(e, dict): sys.exit("mmroom: the entry must be a JSON object")
+    e = dict(e, round=a.round, ts=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+    line = json.dumps(e, ensure_ascii=False)
+    why = check(lines_of(ME) + [line])[-1][1]
+    if why: sys.exit(f"mmroom: invalid entry ({why}), readers would drop it; not written")
+    with open(SELF, "a", encoding="utf-8") as f: f.write(line + "\n")
+
+
+def cmd_read(a):
+    kept, dropped = collect(a.round)
+    emit(kept)
+    if a.dropped:
+        for d in dropped: print(json.dumps(d, ensure_ascii=False))
+
+
+def cmd_wait(a):
+    if a.round > MAX_ROUND: print("round limit reached"); sys.exit(3)
+    poll = float(os.environ.get("MMROOM_POLL", "1"))
+    deadline = time.time() + a.timeout
+    while True:
+        kept, _ = collect(a.round)
+        left = {e.get("who") for e in kept if e["from"] == "control" and e.get("type") == "leave"}
+        posted = {e["from"] for e in kept if e.get("type") == "claim"}
+        if all(p in posted or p in left for p in participants() if p != ME):
+            emit(kept); return
+        if time.time() >= deadline:
+            emit(kept); sys.exit(2)
+        time.sleep(poll)
+
+
+def main():
+    if not ROOM: sys.exit("mmroom: MMROOM_DIR is not set")
+    ap = argparse.ArgumentParser(prog="mmroom")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("post"); p.add_argument("--round", type=int, required=True); p.add_argument("--json", required=True)
+    p = sub.add_parser("read"); p.add_argument("--round", type=int); p.add_argument("--dropped", action="store_true")
+    p = sub.add_parser("wait"); p.add_argument("--round", type=int, required=True); p.add_argument("--timeout", type=float, default=300)
+    a = ap.parse_args()
+    {"post": cmd_post, "read": cmd_read, "wait": cmd_wait}[a.cmd](a)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,27 @@
+{
+  "name": "claude-utopia",
+  "owner": { "name": "Paradox07127" },
+  "description": "Claude Code mods and plugins: a status band and workbench, a progress board, multi-model code review, and guardrails. Work in progress.",
+  "plugins": [
+    {
+      "name": "dashboard",
+      "source": "./plugins/dashboard",
+      "description": "UI layer: a status band plus a seven-page workbench (Overview / Agents / Reviews / GPU / Timeline / Usage / Progress; Reviews, GPU and Progress show once they have data) via /dashboard, /subagents, /mmrun, /gpu, /timeline."
+    },
+    {
+      "name": "harness",
+      "source": "./plugins/harness",
+      "description": "Skills and guard hooks: ai-code-cleanup, interrogate, shape-task, verify-change, setup, plus a git guard for the shared main worktree and a guard against reading API-key config files."
+    },
+    {
+      "name": "mm",
+      "source": "./plugins/mm",
+      "description": "Multi-model cross review and task dispatch: /mm:review and /mm:run, backed by mmrun."
+    },
+    {
+      "name": "progress",
+      "source": "./plugins/progress",
+      "description": "A per-project progress board: the main model records each conversation's work through the progress tool; an optional Artifact canvas mirrors it."
+    }
+  ]
+}

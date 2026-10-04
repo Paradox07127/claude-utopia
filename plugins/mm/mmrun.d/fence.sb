@@ -1,0 +1,23 @@
+; macOS seatbelt fence used by mmrun (sandbox-exec -f fence.sb -D ...).
+; For CLIs whose own sandbox is unusable, like grok / agy (grok refuses to start when /var/run/docker.sock is a symlink),
+; it still ensures: (1) no reads of other models' output, Claude transcripts, codex sessions; (2) writes only to WT (delegated worktree), own state dir and temp dirs.
+; Review mode points WT at a nonexistent path = whole disk read-only.
+(version 1)
+(allow default)
+(deny file-read* (subpath (param "MMRUNS")))
+(deny file-read* (subpath (param "CLAUDE_PROJECTS")))
+(deny file-read* (subpath (param "CODEX_SESSIONS")))
+(deny file-write* (subpath (param "HOME")))
+(allow file-write* (subpath (param "WT")))
+(allow file-write* (subpath (param "STATE")))
+(allow file-write* (subpath "/private/tmp"))
+(allow file-write* (subpath "/private/var/folders"))
+(allow file-write* (subpath "/var/folders"))
+(allow file-write* (subpath "/tmp"))
+; The worktree's .git pointer: if changed, mmrun would read another repo's config when collecting the patch on the host.
+; Must come after the temp-dir allows, since the worktree may live under a temp dir
+(deny file-write* (literal (string-append (param "WT") "/.git")))
+; This run's own prompt must be readable (placed after the denies; later rules win)
+(allow file-read* (literal (param "PROMPT")))
+; Review mode: the reviewed repo itself is not writable (it may be under a dir allowed above, like /tmp); delegated mode passes /nonexistent
+(deny file-write* (subpath (param "RO")))

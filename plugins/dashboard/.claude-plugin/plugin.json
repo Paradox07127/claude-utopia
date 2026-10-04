@@ -1,0 +1,52 @@
+{
+  "name": "dashboard",
+  "version": "0.5.13",
+  "description": "Unified workbench: a status band for subagents and mmrun reviews, plus a seven-page pane (Overview / Agents / Reviews / GPU / Timeline / Usage / Progress; Reviews, GPU and Progress show once they have data); the Progress page lists the per-project progress board the main model records each conversation's work on",
+  "author": { "name": "Paradox07127" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "gpuHosts": {
+      "type": "string",
+      "title": "GPU hosts",
+      "description": "Comma-separated ssh host names; a Bash call starting with `ssh <host>` opens the workbench on that host's GPU page.",
+      "default": ""
+    },
+    "cacheTtlMinutes": {
+      "type": "number",
+      "title": "Prompt cache TTL (minutes)",
+      "description": "Main thread idle this long: the band warns that the next message rewrites the prompt cache. The TTL read from the transcript, or reported by a model switch, overrides it for the session.",
+      "default": 60
+    },
+    "language": {
+      "type": "string",
+      "options": ["auto", "zh-CN", "en"],
+      "default": "auto",
+      "title": "Language",
+      "description": "UI language. auto follows the settings `language`, then LC_ALL / LANG, and falls back to English."
+    },
+    "askSound": {
+      "type": "boolean",
+      "title": "Chime when another session waits on you",
+      "description": "A short chime with the toast of another session asking a permission or failed; only from the session you typed in last.",
+      "default": false
+    },
+    "toastPeerAsks": {
+      "type": "boolean",
+      "title": "Toast other sessions asking or failed",
+      "description": "Toast when another session asks a permission or its turn fails.",
+      "default": true
+    },
+    "toastPeerReplies": {
+      "type": "boolean",
+      "title": "Toast other sessions' replies",
+      "description": "Toast when another session replies after a turn of two minutes or more.",
+      "default": true
+    },
+    "toastRuns": {
+      "type": "boolean",
+      "title": "Toast review results",
+      "description": "Toast when an mmrun model returns, fails or goes stale.",
+      "default": true
+    }
+  }
+}

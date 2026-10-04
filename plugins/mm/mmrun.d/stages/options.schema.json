@@ -1,0 +1,80 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["own_proposal", "approaches", "smaller_alternative", "premise_challenges", "would_change_my_mind", "questions_for_user", "caller_challenge", "summary", "verdict"],
+  "properties": {
+    "own_proposal": { "type": "string", "description": "Your own design, derived from the stated intent and the existing code, before comparing with any design in the material." },
+    "approaches": {
+      "type": "array",
+      "description": "Approaches that differ in strategy, not small variations of one approach.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "strategy", "tradeoffs", "best_when", "worst_when", "basis"],
+        "properties": {
+          "id": { "type": "string", "description": "Short unique id such as A1, used to refer to this item later." },
+          "strategy": { "type": "string", "description": "The approach in one or two sentences." },
+          "tradeoffs": { "type": "string", "description": "What it gains and what it costs." },
+          "best_when": { "type": "string", "description": "Conditions under which this approach is the right one." },
+          "worst_when": { "type": "string", "description": "Conditions under which this approach goes wrong." },
+          "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." }
+        }
+      }
+    },
+    "smaller_alternative": { "type": ["string", "null"], "description": "A much smaller change that gets most of the value; null if there is none." },
+    "premise_challenges": {
+      "type": "array",
+      "description": "Premises in the material you doubt. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "premise", "evidence_to_settle", "basis"],
+        "properties": {
+          "id": { "type": "string", "description": "Short unique id such as P1, used to refer to this item later." },
+          "premise": { "type": "string", "description": "The premise and why you doubt it." },
+          "evidence_to_settle": { "type": "string", "description": "What evidence or check would settle it." },
+          "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." }
+        }
+      }
+    },
+    "would_change_my_mind": {
+      "type": "array",
+      "description": "Evidence that would change your verdict. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["need", "why"],
+        "properties": {
+          "need": { "type": "string", "description": "The fact or result you would need to see." },
+          "why": { "type": "string", "description": "How it would change your verdict." }
+        }
+      }
+    },
+    "questions_for_user": {
+      "type": "array",
+      "description": "Questions only the user can answer, such as preferences, priorities or facts outside the code. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["q", "recommended"],
+        "properties": {
+          "q": { "type": "string" },
+          "recommended": { "type": "string", "description": "The answer you would pick and why." }
+        }
+      }
+    },
+    "caller_challenge": {
+      "type": ["object", "null"],
+      "description": "Set only when you disagree with a direction the caller has already chosen; otherwise null.",
+      "additionalProperties": false,
+      "required": ["challenge", "context_possibly_missing", "cost_if_wrong"],
+      "properties": {
+        "challenge": { "type": "string", "description": "What you think is wrong with the chosen direction." },
+        "context_possibly_missing": { "type": "string", "description": "Context the caller may have that you do not, which would make this challenge wrong." },
+        "cost_if_wrong": { "type": "string", "description": "What it costs if the caller follows this challenge and you are wrong." }
+      }
+    },
+    "summary": { "type": "string", "description": "1-3 sentences. No praise, no restating the material." },
+    "verdict": { "type": "string", "enum": ["proceed", "reconsider", "rethink"], "description": "proceed: the intended route holds up; reconsider: another listed approach looks better; rethink: the goal or its premises need another look." }
+  }
+}

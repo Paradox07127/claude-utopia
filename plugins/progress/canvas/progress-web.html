@@ -1,0 +1,460 @@
+<title>Progress Web</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a full-height dot-grid canvas (a drafting table) with a slim top bar and a detail drawer on the right. */
+:root {
+  --bg: #f3f4f1;
+  --grid: #d9dcd4;
+  --panel: #ffffff;
+  --fg: #1d2420;
+  --muted: #66706a;
+  --line: #c7ccc4;
+  --accent: #2d6a5a;
+  --doing: #b7791f;
+  --blocked: #c0392b;
+  --todo: #7d8781;
+  --done: #2f855a;
+  --edge: #8b958f;
+  --shadow: 0 1px 2px rgba(29, 36, 32, .08), 0 4px 14px rgba(29, 36, 32, .06);
+  --sans: "Schibsted Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141816; --grid: #252b28; --panel: #1c211e; --fg: #e4e8e3; --muted: #97a29b; --line: #343c37;
+    --accent: #6cc4a8; --doing: #e0a43c; --blocked: #ef6b5b; --todo: #8a958e; --done: #5cc189; --edge: #6d7871;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .3);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141816; --grid: #252b28; --panel: #1c211e; --fg: #e4e8e3; --muted: #97a29b; --line: #343c37;
+  --accent: #6cc4a8; --doing: #e0a43c; --blocked: #ef6b5b; --todo: #8a958e; --done: #5cc189; --edge: #6d7871;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .3);
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; display: flex; flex-direction: column; overflow: hidden; }
+header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: .01em; }
+select, button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+button { cursor: pointer; }
+button:hover, select:hover { border-color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: transparent; }
+.chip[aria-pressed="false"] { opacity: .45; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.count { font-variant-numeric: tabular-nums; color: var(--muted); }
+.spacer { flex: 1; }
+.zoom { display: flex; gap: 4px; }
+main { flex: 1; position: relative; min-height: 0; display: flex; }
+#stage { flex: 1; min-width: 0; position: relative; touch-action: none; cursor: grab; }
+#stage.panning { cursor: grabbing; }
+svg { width: 100%; height: 100%; display: block; }
+.node { cursor: pointer; }
+.node rect.card { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.node.selected rect.card { stroke: var(--accent); stroke-width: 2; }
+.node text { fill: var(--fg); font-family: var(--sans); }
+.node .meta { fill: var(--muted); font-size: 11px; }
+.node .title { font-size: 13px; font-weight: 600; }
+.edge { fill: none; stroke: var(--edge); stroke-width: 1.4; }
+.edge.depends { stroke-dasharray: 6 4; }
+.edge.proposed { stroke-dasharray: 2 4; opacity: .7; }
+.edge.hot { stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
+#empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; pointer-events: none; }
+#empty div { max-width: 34ch; color: var(--muted); line-height: 1.5; }
+#empty strong { display: block; color: var(--fg); font-size: 16px; margin-bottom: 6px; text-wrap: balance; }
+aside { width: min(360px, 100%); border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+aside h2 { font-size: 17px; margin: 0; text-wrap: balance; line-height: 1.3; }
+aside p { margin: 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+aside dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; font-size: 12px; }
+aside dt { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: 10.5px; padding-top: 2px; }
+aside dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.mono { font-family: var(--mono); font-size: 12px; }
+.links { display: flex; flex-direction: column; gap: 4px; }
+.links button { text-align: left; border: none; padding: 2px 0; background: none; color: var(--accent); }
+.legend { font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+.legend svg { width: 28px; height: 8px; display: inline-block; vertical-align: middle; margin-right: 4px; }
+@media (max-width: 720px) {
+  main { flex-direction: column; }
+  aside { width: auto; border-left: none; border-top: 1px solid var(--line); max-height: 45%; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<header>
+  <h1>Progress Web</h1>
+  <label class="mono" for="project" hidden>Project</label>
+  <select id="project" aria-label="Project"></select>
+  <div class="filters" id="filters" role="group" aria-label="Show statuses"></div>
+  <div class="spacer"></div>
+  <div class="zoom">
+    <button id="zoom-out" aria-label="Zoom out">−</button>
+    <button id="zoom-in" aria-label="Zoom in">+</button>
+    <button id="fit">Fit</button>
+    <button id="relayout" title="Forget dragged positions for this project">Auto layout</button>
+  </div>
+</header>
+<main>
+  <div id="stage">
+    <svg id="svg" aria-label="Progress graph">
+      <defs>
+        <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="var(--grid)"/></pattern>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--edge)"/></marker>
+      </defs>
+      <rect id="bg" width="100%" height="100%" fill="url(#grid)"/>
+      <g id="world"><g id="edges"></g><g id="nodes"></g></g>
+    </svg>
+    <div id="empty"><div><strong>No progress recorded yet</strong>When Claude finishes the work of a conversation, it adds a node here and links it to the earlier work it builds on.</div></div>
+  </div>
+  <aside id="detail" hidden></aside>
+</main>
+<div class="legend">
+  <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" stroke="var(--edge)" stroke-width="1.5"/></svg>builds on</span>
+  <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="6 4"/></svg>depends on</span>
+  <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="2 4"/></svg>proposed, not confirmed</span>
+  <span>Drag a node to move it · drag the canvas to pan · scroll to zoom</span>
+</div>
+
+<script>
+const STATUSES = [
+  { key: 'doing', label: 'Doing' },
+  { key: 'blocked', label: 'Blocked' },
+  { key: 'todo', label: 'To do' },
+  { key: 'done', label: 'Done' },
+]
+const NODE_W = 232, NODE_H = 66, COL_GAP = 96, ROW_GAP = 26
+const NS = 'http://www.w3.org/2000/svg'
+const $ = id => document.getElementById(id)
+
+const state = {
+  db: null, projects: [], project: null,
+  nodes: new Map(), edges: [], positions: new Map(),
+  shown: new Set(STATUSES.map(s => s.key)),
+  view: { x: 40, y: 40, k: 1 }, selected: null, unsubs: [],
+}
+
+const store = {
+  get(key) { try { return JSON.parse(localStorage.getItem(key)) } catch { return null } },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)) } catch {} },
+}
+
+function el(name, attrs = {}, text) {
+  const node = document.createElementNS(NS, name)
+  for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v)
+  if (text !== undefined) node.textContent = text
+  return node
+}
+
+const createdOf = n => Number(n.created ?? n.createdAt ?? n.at ?? 0)
+const dateText = ms => ms ? new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''
+const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+
+// Columns by the longest chain of links from a root; within a column, oldest first.
+function autoLayout(nodes, edges) {
+  const parents = new Map(nodes.map(n => [n.id, []]))
+  for (const e of edges) if (parents.has(e.to) && parents.has(e.from)) parents.get(e.from).push(e.to)
+  const depth = new Map()
+  const visit = (id, seen) => {
+    if (depth.has(id)) return depth.get(id)
+    if (seen.has(id)) return 0
+    seen.add(id)
+    const d = Math.max(-1, ...parents.get(id).map(p => visit(p, seen))) + 1
+    depth.set(id, d)
+    return d
+  }
+  nodes.forEach(n => visit(n.id, new Set()))
+  const cols = new Map()
+  for (const n of [...nodes].sort((a, b) => createdOf(a) - createdOf(b))) {
+    const d = depth.get(n.id)
+    if (!cols.has(d)) cols.set(d, [])
+    cols.get(d).push(n)
+  }
+  const at = new Map()
+  for (const [d, list] of cols) list.forEach((n, i) => at.set(n.id, { x: d * (NODE_W + COL_GAP), y: i * (NODE_H + ROW_GAP) }))
+  return at
+}
+
+function visibleNodes() { return [...state.nodes.values()].filter(n => state.shown.has(n.status)) }
+
+function layout() {
+  const nodes = [...state.nodes.values()]
+  const auto = autoLayout(nodes, state.edges)
+  const at = new Map()
+  for (const n of nodes) at.set(n.id, state.positions.get(n.id) ?? auto.get(n.id))
+  return at
+}
+
+function edgePath(a, b) {
+  const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2
+  const dx = Math.max(40, Math.abs(x2 - x1) / 2)
+  return `M${x1} ${y1} C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}`
+}
+
+let positions = new Map()
+
+function render() {
+  positions = layout()
+  const shown = visibleNodes()
+  const ids = new Set(shown.map(n => n.id))
+  $('empty').hidden = state.nodes.size > 0
+  const edgesG = $('edges'), nodesG = $('nodes')
+  edgesG.replaceChildren(); nodesG.replaceChildren()
+
+  for (const e of state.edges) {
+    if (!ids.has(e.from) || !ids.has(e.to)) continue
+    // Edges run from the earlier node (the one built on or depended on) to the later one.
+    const path = el('path', {
+      d: edgePath(positions.get(e.to), positions.get(e.from)),
+      class: `edge${e.kind === 'depends_on' ? ' depends' : ''}${e.confirmed === false ? ' proposed' : ''}${state.selected && (e.from === state.selected || e.to === state.selected) ? ' hot' : ''}`,
+      'marker-end': 'url(#arrow)',
+    })
+    edgesG.append(path)
+  }
+
+  for (const n of shown) {
+    const p = positions.get(n.id)
+    const g = el('g', { class: `node${n.id === state.selected ? ' selected' : ''}`, transform: `translate(${p.x} ${p.y})`, tabindex: '0', role: 'button', 'aria-label': `${n.title}, ${n.status}` })
+    g.dataset.id = n.id
+    g.append(el('rect', { class: 'card', width: NODE_W, height: NODE_H, rx: 8 }))
+    g.append(el('rect', { x: 0, y: 8, width: 3, height: NODE_H - 16, rx: 1.5, fill: `var(--${n.status in { doing: 1, blocked: 1, todo: 1, done: 1 } ? n.status : 'todo'})` }))
+    g.append(el('text', { class: 'title', x: 14, y: 26 }, clip(n.title ?? n.id, 30)))
+    g.append(el('text', { class: 'meta', x: 14, y: 47 }, [STATUSES.find(s => s.key === n.status)?.label ?? n.status, n.kind, dateText(createdOf(n))].filter(Boolean).join(' · ')))
+    nodesG.append(g)
+  }
+  applyView()
+  renderFilters()
+  renderDetail()
+}
+
+function applyView() {
+  const { x, y, k } = state.view
+  $('world').setAttribute('transform', `translate(${x} ${y}) scale(${k})`)
+}
+
+function saveView() { if (state.project) store.set(`view:${state.project}`, state.view) }
+
+function zoomAt(factor, cx, cy) {
+  const v = state.view
+  const k = Math.min(2.5, Math.max(0.2, v.k * factor))
+  v.x = cx - (cx - v.x) * (k / v.k)
+  v.y = cy - (cy - v.y) * (k / v.k)
+  v.k = k
+  applyView(); saveView()
+}
+
+function fit() {
+  const shown = visibleNodes()
+  if (shown.length === 0) return
+  const xs = shown.map(n => positions.get(n.id).x), ys = shown.map(n => positions.get(n.id).y)
+  const minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs) + NODE_W, maxY = Math.max(...ys) + NODE_H
+  const box = $('stage').getBoundingClientRect()
+  const k = Math.min(1.2, Math.max(0.2, Math.min((box.width - 64) / (maxX - minX), (box.height - 64) / (maxY - minY))))
+  state.view = { k, x: (box.width - (maxX - minX) * k) / 2 - minX * k, y: (box.height - (maxY - minY) * k) / 2 - minY * k }
+  applyView(); saveView()
+}
+
+function renderFilters() {
+  const box = $('filters')
+  box.replaceChildren()
+  for (const s of STATUSES) {
+    const count = [...state.nodes.values()].filter(n => n.status === s.key).length
+    const b = document.createElement('button')
+    b.className = 'chip'
+    b.setAttribute('aria-pressed', String(state.shown.has(s.key)))
+    b.innerHTML = `<span class="dot" style="background:var(--${s.key})"></span>`
+    b.append(s.label, Object.assign(document.createElement('span'), { className: 'count', textContent: count }))
+    b.onclick = () => { state.shown.has(s.key) ? state.shown.delete(s.key) : state.shown.add(s.key); render() }
+    box.append(b)
+  }
+}
+
+function linkButtons(ids) {
+  const box = document.createElement('div')
+  box.className = 'links'
+  for (const id of ids) {
+    const b = document.createElement('button')
+    b.textContent = state.nodes.get(id)?.title ?? id
+    b.onclick = () => select(id, true)
+    box.append(b)
+  }
+  return box
+}
+
+function renderDetail() {
+  const box = $('detail')
+  const n = state.selected && state.nodes.get(state.selected)
+  box.hidden = !n
+  if (!n) return
+  box.replaceChildren()
+  const h = document.createElement('h2'); h.textContent = n.title ?? n.id
+  const p = document.createElement('p'); p.textContent = n.summary ?? ''
+  const dl = document.createElement('dl')
+  const row = (k, v, mono) => {
+    if (v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0)) return
+    const dt = document.createElement('dt'); dt.textContent = k
+    const dd = document.createElement('dd')
+    if (v instanceof Node) dd.append(v); else { dd.textContent = v; if (mono) dd.className = 'mono' }
+    dl.append(dt, dd)
+  }
+  const status = document.createElement('span')
+  status.innerHTML = `<span class="dot" style="display:inline-block;margin-right:6px;background:var(--${n.status})"></span>`
+  status.append(STATUSES.find(s => s.key === n.status)?.label ?? n.status)
+  row('Status', status)
+  row('Kind', n.kind)
+  row('Created', createdOf(n) ? new Date(createdOf(n)).toLocaleString() : '')
+  if (n.updated && n.updated !== createdOf(n)) row('Updated', new Date(n.updated).toLocaleString())
+  const out = kind => state.edges.filter(e => e.from === n.id && e.kind === kind).map(e => e.to)
+  const into = state.edges.filter(e => e.to === n.id).map(e => e.from)
+  if (out('builds_on').length) row('Builds on', linkButtons(out('builds_on')))
+  if (out('depends_on').length) row('Depends on', linkButtons(out('depends_on')))
+  if (into.length) row('Led to', linkButtons(into))
+  row('Commit', n.commit, true)
+  row('Node', n.id, true)
+  box.append(h, p, dl)
+}
+
+function select(id, center) {
+  state.selected = id
+  render()
+  if (center && id && positions.has(id)) {
+    const p = positions.get(id), box = $('stage').getBoundingClientRect(), k = state.view.k
+    state.view.x = box.width / 2 - (p.x + NODE_W / 2) * k
+    state.view.y = box.height / 2 - (p.y + NODE_H / 2) * k
+    applyView(); saveView()
+  }
+}
+
+// Pointer: a node drags itself and saves its spot once on release; the canvas pans.
+let drag = null
+$('stage').addEventListener('pointerdown', ev => {
+  const g = ev.target.closest('.node')
+  const p = g && positions.get(g.dataset.id)
+  drag = g ? { id: g.dataset.id, sx: ev.clientX, sy: ev.clientY, ox: p.x, oy: p.y, moved: false } : { pan: true, sx: ev.clientX, sy: ev.clientY, ox: state.view.x, oy: state.view.y, moved: false }
+  $('stage').setPointerCapture(ev.pointerId)
+  if (drag.pan) $('stage').classList.add('panning')
+})
+$('stage').addEventListener('pointermove', ev => {
+  if (!drag) return
+  const dx = ev.clientX - drag.sx, dy = ev.clientY - drag.sy
+  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true
+  if (!drag.moved) return
+  if (drag.pan) { state.view.x = drag.ox + dx; state.view.y = drag.oy + dy; applyView(); return }
+  state.positions.set(drag.id, { x: drag.ox + dx / state.view.k, y: drag.oy + dy / state.view.k })
+  render()
+})
+$('stage').addEventListener('pointerup', async () => {
+  const was = drag
+  drag = null
+  $('stage').classList.remove('panning')
+  if (!was) return
+  if (was.pan) { if (was.moved) saveView(); else select(null); return }
+  if (!was.moved) { select(was.id); return }
+  const p = state.positions.get(was.id)
+  if (state.db && state.project) {
+    await state.db.doc(`projects/${state.project}/positions/${was.id}`).set({ x: Math.round(p.x), y: Math.round(p.y) }).catch(() => {})
+  }
+})
+$('stage').addEventListener('keydown', ev => {
+  const g = ev.target.closest?.('.node')
+  if (g && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); select(g.dataset.id) }
+})
+$('stage').addEventListener('wheel', ev => {
+  ev.preventDefault()
+  const box = $('stage').getBoundingClientRect()
+  zoomAt(Math.exp(-ev.deltaY * 0.0015), ev.clientX - box.left, ev.clientY - box.top)
+}, { passive: false })
+const centerZoom = f => { const b = $('stage').getBoundingClientRect(); zoomAt(f, b.width / 2, b.height / 2) }
+$('zoom-in').onclick = () => centerZoom(1.2)
+$('zoom-out').onclick = () => centerZoom(1 / 1.2)
+$('fit').onclick = fit
+$('relayout').onclick = async () => {
+  const ids = [...state.positions.keys()]
+  state.positions = new Map()
+  render(); fit()
+  if (state.db && state.project) for (const id of ids) await state.db.doc(`projects/${state.project}/positions/${id}`).delete().catch(() => {})
+}
+
+function openProject(id) {
+  state.unsubs.forEach(u => u()); state.unsubs = []
+  state.project = id; state.nodes = new Map(); state.edges = []; state.positions = new Map(); state.selected = null
+  store.set('project', id)
+  $('project').value = id ?? ''
+  const saved = store.get(`view:${id}`)
+  let fitted = !!saved
+  if (saved) state.view = saved
+  render()
+  if (!id) return
+  const base = `projects/${id}`
+  const onErr = () => {}
+  state.unsubs.push(state.db.collection(`${base}/events`).onSnapshot(snap => {
+    fold(snap.docs.map(d => d.data()))
+    render()
+    if (!fitted && state.nodes.size) { fitted = true; fit() }
+  }, onErr))
+  state.unsubs.push(state.db.collection(`${base}/positions`).onSnapshot(snap => {
+    if (drag && !drag.pan) return
+    state.positions = new Map(snap.docs.map(d => [d.id, d.data()]))
+    render()
+  }, onErr))
+}
+
+// The board is append-only events, oldest first, each with its node's full fields after it: the first seen makes the node, whatever
+// its type (an earlier one may never have been mirrored), and the latest by time wins.
+function fold(events) {
+  const nodes = new Map()
+  for (const e of [...events].sort((a, b) => (a.at ?? 0) - (b.at ?? 0))) {
+    if (typeof e.node !== 'string') continue
+    const was = nodes.get(e.node)
+    if (!was) nodes.set(e.node, { id: e.node, created: e.at, updated: e.at, commit: e.commit ?? null, ...e.fields })
+    else nodes.set(e.node, { ...was, ...e.fields, updated: e.at, commit: e.commit ?? was.commit })
+  }
+  const edges = []
+  for (const n of nodes.values()) {
+    for (const to of Array.isArray(n.builds_on) ? n.builds_on : []) edges.push({ from: n.id, to, kind: 'builds_on' })
+    for (const d of Array.isArray(n.depends_on) ? n.depends_on : []) if (d && typeof d.id === 'string') edges.push({ from: n.id, to: d.id, kind: 'depends_on', confirmed: d.confirmed === true })
+  }
+  state.nodes = nodes
+  state.edges = edges
+}
+
+function renderProjects() {
+  const sel = $('project')
+  sel.replaceChildren()
+  for (const p of state.projects) {
+    const o = document.createElement('option')
+    o.value = p.id; o.textContent = p.name ?? p.id
+    sel.append(o)
+  }
+  sel.hidden = state.projects.length === 0
+  if (state.project) sel.value = state.project
+}
+$('project').onchange = ev => openProject(ev.target.value)
+
+;(async () => {
+  render()
+  const db = await claude.use('db')
+  if (!db) {
+    $('empty').querySelector('div').innerHTML = '<strong>The board cannot load here</strong>Open this page signed in to claude.ai to see the progress recorded by Claude.'
+    return
+  }
+  state.db = db
+  // Every sync adds a doc `<project>~e<at>`: one entry per project, named by its newest doc.
+  db.collection('projectIndex').onSnapshot(snap => {
+    const byProject = new Map()
+    for (const d of snap.docs) {
+      const { project, name } = d.data()
+      const at = Number(d.id.slice(d.id.lastIndexOf('~e') + 2)) || 0
+      if (typeof project === 'string' && !(byProject.get(project)?.at > at)) byProject.set(project, { id: project, name, at })
+    }
+    state.projects = [...byProject.values()].sort((a, b) => String(a.name ?? a.id).localeCompare(String(b.name ?? b.id)))
+    const remembered = store.get('project')
+    const want = state.projects.some(p => p.id === state.project) ? state.project : state.projects.some(p => p.id === remembered) ? remembered : state.projects[0]?.id ?? null
+    renderProjects()
+    if (want !== state.project) openProject(want)
+  }, () => {})
+})()
+</script>

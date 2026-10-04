@@ -1,0 +1,95 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["failures", "assumptions", "unknowns", "not_checked", "would_change_my_mind", "questions_for_user", "caller_challenge", "summary", "verdict"],
+  "properties": {
+    "failures": {
+      "type": "array",
+      "description": "Failures you can construct a concrete path to. General worries without a constructed path do not belong here.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "failure", "construction", "evidence", "one_way", "undo_cost", "basis"],
+        "properties": {
+          "id": { "type": "string", "description": "Short unique id such as F1, used to refer to this item later." },
+          "failure": { "type": "string", "description": "What goes wrong, as the user would see it." },
+          "construction": { "type": "string", "description": "The specific input, ordering or state and the code path that lead to the failure." },
+          "evidence": { "type": "string", "description": "file:line or command output that supports the construction." },
+          "one_way": { "type": "boolean", "description": "true if the failure is hard to undo once shipped." },
+          "undo_cost": { "type": "string", "description": "What it takes to undo the damage." },
+          "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." }
+        }
+      }
+    },
+    "assumptions": {
+      "type": "array",
+      "description": "Assumptions the plan rests on.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "claim", "how_to_verify", "basis"],
+        "properties": {
+          "id": { "type": "string", "description": "Short unique id such as S1, used to refer to this item later." },
+          "claim": { "type": "string", "description": "The assumption." },
+          "how_to_verify": { "type": "string", "description": "A command, read or test that would confirm or refute it." },
+          "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." }
+        }
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "description": "Possible problems you could not settle either way. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "q", "cheapest_experiment", "basis"],
+        "properties": {
+          "id": { "type": "string", "description": "Short unique id such as U1, used to refer to this item later." },
+          "q": { "type": "string", "description": "The open question." },
+          "cheapest_experiment": { "type": "string", "description": "The cheapest check that would answer it." },
+          "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." }
+        }
+      }
+    },
+    "not_checked": { "type": "array", "items": { "type": "string" }, "description": "Parts of the plan or code you did not examine. Empty if none." },
+    "would_change_my_mind": {
+      "type": "array",
+      "description": "Evidence that would change your verdict. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["need", "why"],
+        "properties": {
+          "need": { "type": "string", "description": "The fact or result you would need to see." },
+          "why": { "type": "string", "description": "How it would change your verdict." }
+        }
+      }
+    },
+    "questions_for_user": {
+      "type": "array",
+      "description": "Questions only the user can answer, such as preferences, priorities or facts outside the code. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["q", "recommended"],
+        "properties": {
+          "q": { "type": "string" },
+          "recommended": { "type": "string", "description": "The answer you would pick and why." }
+        }
+      }
+    },
+    "caller_challenge": {
+      "type": ["object", "null"],
+      "description": "Set only when you disagree with a direction the caller has already chosen; otherwise null.",
+      "additionalProperties": false,
+      "required": ["challenge", "context_possibly_missing", "cost_if_wrong"],
+      "properties": {
+        "challenge": { "type": "string", "description": "What you think is wrong with the chosen direction." },
+        "context_possibly_missing": { "type": "string", "description": "Context the caller may have that you do not, which would make this challenge wrong." },
+        "cost_if_wrong": { "type": "string", "description": "What it costs if the caller follows this challenge and you are wrong." }
+      }
+    },
+    "summary": { "type": "string", "description": "1-3 sentences. No praise, no restating the material." },
+    "verdict": { "type": "string", "enum": ["ship", "revise", "rethink"], "description": "ship: no constructed failure needs a change to the plan; revise: the plan holds but needs changes; rethink: the approach itself fails." }
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["questions", "would_change_my_mind", "questions_for_user", "caller_challenge", "summary", "verdict"],
+  "properties": {
+    "questions": {
+      "type": "array",
+      "description": "Open questions whose answers would change what gets built. At most 5, ordered by impact times uncertainty, highest first. Leave out anything the code already answers.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "q", "why", "options", "recommended", "blocks", "basis"],
+        "properties": {
+          "id": { "type": "string", "description": "Short unique id such as Q1, used to refer to this item later." },
+          "q": { "type": "string", "description": "The question, answerable in one short reply." },
+          "why": { "type": "string", "description": "What changes in the work depending on the answer." },
+          "options": { "type": "array", "items": { "type": "string" }, "description": "The realistic answers." },
+          "recommended": { "type": "string", "description": "The option you would pick and why." },
+          "blocks": { "type": "boolean", "description": "true if work cannot safely start until this is answered." },
+          "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." }
+        }
+      }
+    },
+    "would_change_my_mind": {
+      "type": "array",
+      "description": "Evidence that would change your verdict. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["need", "why"],
+        "properties": {
+          "need": { "type": "string", "description": "The fact or result you would need to see." },
+          "why": { "type": "string", "description": "How it would change your verdict." }
+        }
+      }
+    },
+    "questions_for_user": {
+      "type": "array",
+      "description": "Questions only the user can answer, such as preferences, priorities or facts outside the code. Empty if none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["q", "recommended"],
+        "properties": {
+          "q": { "type": "string" },
+          "recommended": { "type": "string", "description": "The answer you would pick and why." }
+        }
+      }
+    },
+    "caller_challenge": {
+      "type": ["object", "null"],
+      "description": "Set only when you disagree with a direction the caller has already chosen; otherwise null.",
+      "additionalProperties": false,
+      "required": ["challenge", "context_possibly_missing", "cost_if_wrong"],
+      "properties": {
+        "challenge": { "type": "string", "description": "What you think is wrong with the chosen direction." },
+        "context_possibly_missing": { "type": "string", "description": "Context the caller may have that you do not, which would make this challenge wrong." },
+        "cost_if_wrong": { "type": "string", "description": "What it costs if the caller follows this challenge and you are wrong." }
+      }
+    },
+    "summary": { "type": "string", "description": "1-3 sentences. No praise, no restating the material." },
+    "verdict": { "type": "string", "enum": ["ready", "blocked"], "description": "ready: work can start safely on your recommended answers; blocked: at least one question must be answered by the user first." }
+  }
+}

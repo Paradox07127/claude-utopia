@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings", "not_checked", "not_expanded", "summary", "verdict"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "file", "line", "quote", "claim", "failure_scenario", "basis", "suggestion", "issue_identity"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["critical", "major", "minor", "optional"], "description": "critical = data loss/corruption, security control fails, or always wrong; major = wrong under normal use with reasonable input; minor = needs an unusual precondition (state it in failure_scenario). When unsure pick the lower one; exception: a security control failing on a normal path is never downgraded." },
+          "file": { "type": "string" },
+          "line": { "type": ["integer", "null"] },
+          "quote": { "type": "string", "description": "The offending line(s) verbatim, at most 3 lines." },
+          "claim": { "type": "string", "description": "What is wrong, mechanism not symptom." },
+          "failure_scenario": { "type": "string", "description": "Which input / timing -> which wrong result." },
+          "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." },
+          "suggestion": { "type": ["string", "null"], "description": "Concrete fix; null in brief mode unless it fixes a real bug." },
+          "issue_identity": { "type": "string", "description": "2-4 lowercase English words joined by hyphens naming the mechanism, e.g. missing-lock-on-write. No file names." }
+        }
+      }
+    },
+    "not_checked": { "type": "array", "items": { "type": "string" }, "description": "Parts of the material you did not examine (files, areas, aspects). Empty if none." },
+    "not_expanded": { "type": "integer", "description": "Issues found but not listed because of the item cap. 0 when none." },
+    "summary": { "type": "string", "description": "1-3 sentences. No praise, no restating the code." },
+    "verdict": { "type": "string", "enum": ["approve", "request_changes"] }
+  }
+}

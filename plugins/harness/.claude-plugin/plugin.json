@@ -1,0 +1,34 @@
+{
+  "name": "harness",
+  "version": "0.4.12",
+  "description": "Skills and guard hooks: ai-code-cleanup, interrogate, shape-task, verify-change, setup, a shared-worktree git guard, and a guard against reading API-key config files",
+  "author": { "name": "Paradox07127" },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "blockedSubagentModels": {
+      "type": "string",
+      "default": "sonnet",
+      "title": "Blocked subagent models",
+      "description": "Comma-separated. Subagents whose model name contains any entry (case-insensitive) are refused; empty allows all."
+    },
+    "sharedTreeGitGuard": {
+      "type": "boolean",
+      "default": true,
+      "title": "Shared-tree git guard",
+      "description": "Refuse git commands that discard uncommitted changes or rewrite HEAD in the main worktree."
+    },
+    "idleCompact": {
+      "type": "boolean",
+      "default": true,
+      "title": "Compact before the cache expires",
+      "description": "When the main thread sits idle until just before the prompt cache expires, run /compact automatically: with a 1h cache 10 minutes before, at 100k tokens or more; with a 5m cache 1 minute before, at 200k or more. The TTL is read from the transcript."
+    },
+    "language": {
+      "type": "string",
+      "options": ["auto", "zh-CN", "en"],
+      "default": "auto",
+      "title": "Language",
+      "description": "UI language. auto follows the settings `language`, then LC_ALL / LANG, and falls back to English."
+    }
+  }
+}

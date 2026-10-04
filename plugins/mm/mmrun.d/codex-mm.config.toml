@@ -1,0 +1,14 @@
+# mmrun review layer: codex exec -p mm ...
+# Do not also pass -s/--sandbox on the command line — it overrides the path denies of default_permissions.
+sandbox_mode = "read-only"
+default_permissions = "mm_ro"
+
+# During review/delegated work codex can't read other models' output, Claude transcripts or grok sessions, so cross-review isn't biased.
+# ⛔ This profile definition must live in the same config layer as default_permissions: putting it in the base config.toml
+#    makes codex without -p (desktop app / bare CLI) fail at startup.
+# ⛔ -c default_permissions=… and -s on the command line both disable the denies; only the -p config layer works.
+[permissions.mm_ro.filesystem]
+":root" = "read"
+"@HOME@/.claude/mmruns" = "deny"
+"@HOME@/.claude/projects" = "deny"
+"@HOME@/.grok/sessions" = "deny"
