@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PreToolUse/Bash: in a repo's main worktree, refuse git commands that discard uncommitted changes or rewrite HEAD.
+"""PreToolUse/Bash: in a repo's main worktree, refuse git commands that discard uncommitted changes, and git commit --amend.
 
 The main tree often has several writers (Claude sessions, foreground codex/grok); these commands take their changes away.
 Linked worktrees (worker's .claude/worktrees/*, mmrun's .mm-wt/*) are allowed.
@@ -25,6 +25,8 @@ KEYWORDS = {"if", "then", "else", "elif", "do", "while", "until", "!", "{", "}",
 ASSIGN = re.compile(r"^([A-Za-z_]\w*)=(.*)$", re.S)
 REASON = ("Blocked on the shared main worktree: `{op}` would take away uncommitted changes from other sessions or the user. "
           "Undo your own edit with a reverse Edit; for a clean baseline open a temporary worktree. Linked worktrees are exempt.")
+AMEND = ("Blocked on the shared main worktree: `{op}` would rewrite a commit already on the main tree's branch. "
+         "Make a new commit instead. Linked worktrees are exempt.")
 UNVERIFIED = ("Blocked: `{op}` would take away uncommitted changes if this is the shared main worktree, and git could not tell "
               "(git missing, timed out or failed). Make sure `git rev-parse --git-common-dir` works in that directory, "
               "or run the command in a linked worktree.")
@@ -40,14 +42,20 @@ BUILTINS = {"add", "am", "apply", "archive", "bisect", "blame", "branch", "cat-f
             "rm", "shortlog", "show", "show-ref", "stash", "status", "submodule", "switch", "symbolic-ref", "tag",
             "version", "worktree"}
 ALIAS_DEPTH = 5
+# hooks.json kills this hook at 10 s, and a killed hook lets the command through: all git calls share 7 s
+DEADLINE = time.monotonic() + 7
 
 
 def git(target, *args, env=None):
     """Run git in target; the repository is found from target alone unless `env` sets GIT_DIR / GIT_WORK_TREE."""
+    left = DEADLINE - time.monotonic()
+    if left <= 0:
+        return None
     clean = {k: v for k, v in os.environ.items() if k not in REPO_VARS}
     clean.update(env or {}, LC_ALL="C")
     try:
-        return subprocess.run(["git", "-C", target, *args], capture_output=True, text=True, timeout=5, env=clean)
+        return subprocess.run(["git", "-C", target, *args], capture_output=True, text=True, timeout=min(5, left),
+                              env=clean)
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -435,7 +443,7 @@ def main():
     op = check(command, cwd)
     if op:
         log("deny", op, payload)
-        print((UNVERIFIED if unchecked else REASON).format(op=op), file=sys.stderr)
+        print((UNVERIFIED if unchecked else AMEND if op == "git commit --amend" else REASON).format(op=op), file=sys.stderr)
         sys.exit(2)
     sys.exit(0)
 

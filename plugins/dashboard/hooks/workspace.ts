@@ -72,12 +72,15 @@ export function parseGuards(text: string, count: number): GuardBlock[] {
 }
 
 /** `op · worktree · agent · 3m ago`: the cwd's last segment, the agent's first 8 characters or the main thread. */
-export function guardText(block: GuardBlock, now: number): string {
+/** `git push · agent-wt · a1b2c3d4`: what was blocked, in which tree, for whom. */
+export function guardHead(block: GuardBlock): string {
   const tree = block.cwd?.split('/').filter(part => part !== '').pop() ?? '—'
   const agent = block.agentId === null ? t().mainThread : block.agentId.slice(0, 8)
 
-  return [block.op, tree, agent, t().gateAgo(fmtDuration(now - block.at))].join(' · ')
+  return [block.op, tree, agent].join(' · ')
 }
+
+export const guardText = (block: GuardBlock, now: number) => `${guardHead(block)} · ${t().gateAgo(fmtDuration(now - block.at))}`
 
 export type Mark = { text: string; tone: 'stale' | 'done' | 'failed' | 'running' | 'plain' | 'dim' }
 

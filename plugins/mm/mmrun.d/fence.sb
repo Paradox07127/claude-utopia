@@ -1,13 +1,19 @@
 ; macOS seatbelt fence used by mmrun (sandbox-exec -f fence.sb -D ...).
 ; For CLIs whose own sandbox is unusable, like grok / agy (grok refuses to start when /var/run/docker.sock is a symlink),
-; it still ensures: (1) no reads of other models' output, Claude transcripts, codex sessions; (2) writes only to WT (delegated worktree), own state dir and temp dirs.
+; it still ensures: (1) no reads of other models' output and state dirs, Claude transcripts, codex sessions; (2) writes only to WT (delegated worktree), own state dir, temp dirs and /dev.
 ; Review mode points WT at a nonexistent path = whole disk read-only.
 (version 1)
 (allow default)
+; Each model's state dir is unreadable to the others; before the denies below so its own STATE allow cannot override them
+(deny file-read* (subpath (param "GROK_STATE")))
+(deny file-read* (subpath (param "AGY_STATE")))
+(allow file-read* (subpath (param "STATE")))
 (deny file-read* (subpath (param "MMRUNS")))
 (deny file-read* (subpath (param "CLAUDE_PROJECTS")))
 (deny file-read* (subpath (param "CODEX_SESSIONS")))
-(deny file-write* (subpath (param "HOME")))
+; Writes are denied everywhere; only the allows below reopen them (/dev for /dev/null and /dev/tty)
+(deny file-write*)
+(allow file-write* (subpath "/dev"))
 (allow file-write* (subpath (param "WT")))
 (allow file-write* (subpath (param "STATE")))
 (allow file-write* (subpath "/private/tmp"))
@@ -17,6 +23,9 @@
 ; The worktree's .git pointer: if changed, mmrun would read another repo's config when collecting the patch on the host.
 ; Must come after the temp-dir allows, since the worktree may live under a temp dir
 (deny file-write* (literal (string-append (param "WT") "/.git")))
+; Claude Code's temp tree (scratchpads, task outputs): after the temp-dir allows so it wins over them
+(deny file-read* (subpath (param "CLAUDE_TMP")))
+(deny file-write* (subpath (param "CLAUDE_TMP")))
 ; This run's own prompt must be readable (placed after the denies; later rules win)
 (allow file-read* (literal (param "PROMPT")))
 ; Review mode: the reviewed repo itself is not writable (it may be under a dir allowed above, like /tmp); delegated mode passes /nonexistent

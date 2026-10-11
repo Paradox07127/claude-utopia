@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On, RenderInput } from 'claude-code'
+import { withClocks } from './clocks'
 
 const NOW = 1_790_922_800_000
 const BOTTOM = { type: 'Text', props: {}, children: ['engine band'] }
@@ -216,6 +217,21 @@ describe('gates', () => {
     await failed($, HARNESS, BUN_FAIL)
     await clock.advance(30 * 60_000 + 1)
     expect(linesOf(await $.ui.render(band('terminal'))), 'off the band, still the last gate on the idle line').toEqual(['空闲 · 门禁 ✗ 2 fail 30m前', 'engine band'])
+  })
+
+  test('the desktop overview, mounted with nothing else redrawing it, drops a failed gate from 需要你 the moment its 30 minutes pass', { options: { language: 'zh-CN' } }, async ($, on) => {
+    const { clock } = seat(on)
+
+    await failed($, HARNESS, BUN_FAIL)
+
+    const ui = await $.ui.mount({ plugin: 'dashboard', ...pane('desktop') } as never)
+
+    expect(textOf(await ui.drawn())).toContain('需要你  1')
+    await clock.advance(30 * 60_000 - 1_000)
+    expect(textOf(await ui.drawn()), 'a second before').toContain('需要你  1')
+    await clock.advance(1_000)
+    expect(textOf(await ui.drawn())).not.toContain('需要你  1')
+    await ui.unmount()
   })
 
   test('where: the worktree a cd or the cwd points into, else main', async ($, on) => {
@@ -469,7 +485,7 @@ describe('gates', () => {
     expect(colorsOf(terminal, '✗')).toEqual(['inactive'])
     expect(colorsOf(terminal, ' · 过期')).toEqual(['inactive'])
     expect(colorsOf(await $.ui.render(pane('desktop')), ' ✗ 失败 ')).toEqual(['inactive'])
-    expect(textOf(await $.ui.render(pane('desktop')))).toContain('主树 · 2 fail · 过期 · 1m前')
+    expect(textOf(withClocks(await $.ui.render(pane('desktop'))))).toContain('主树 · 2 fail · 过期 · 1m前')
   })
 
   test('what does not make a gate 过期: an edit in another tree or outside the session root, or one no later than the gate', { options: { language: 'zh-CN' } }, async ($, on) => {

@@ -3,7 +3,7 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
 <style>
-/* Layout: a full-height dot-grid canvas (a drafting table) with a slim top bar and a detail drawer on the right. */
+/* Layout: a slim top bar; lines and their requests as rows on a time axis that pans and zooms, or as cards on a freeform graph; the aging plot of open requests under it; a detail drawer on the right. */
 :root {
   --bg: #f3f4f1;
   --grid: #d9dcd4;
@@ -35,49 +35,108 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 4px 14px rgba(0, 0, 0, .3);
   color-scheme: dark;
 }
+[hidden] { display: none !important; }
 html, body { height: 100%; }
-body { background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; display: flex; flex-direction: column; overflow: hidden; }
+body { margin: 0; background: var(--bg); color: var(--fg); font-family: var(--sans); font-size: 14px; display: flex; flex-direction: column; overflow: hidden; }
 header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
 h1 { font-size: 15px; font-weight: 700; margin: 0; letter-spacing: .01em; }
 select, button { font: inherit; color: var(--fg); background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
 button { cursor: pointer; }
 button:hover, select:hover { border-color: var(--accent); }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.filters { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); background: transparent; }
-.chip[aria-pressed="false"] { opacity: .45; }
-.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
-.count { font-variant-numeric: tabular-nums; color: var(--muted); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.seg button { border: none; border-radius: 0; padding: 4px 10px; font-size: 13px; }
+.seg button + button { border-left: 1px solid var(--line); }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--panel); }
 .spacer { flex: 1; }
 .zoom { display: flex; gap: 4px; }
+.now-label { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; }
 main { flex: 1; position: relative; min-height: 0; display: flex; }
-#stage { flex: 1; min-width: 0; position: relative; touch-action: none; cursor: grab; }
-#stage.panning { cursor: grabbing; }
-svg { width: 100%; height: 100%; display: block; }
-.node { cursor: pointer; }
-.node rect.card { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
-.node.selected rect.card { stroke: var(--accent); stroke-width: 2; }
-.node text { fill: var(--fg); font-family: var(--sans); }
-.node .meta { fill: var(--muted); font-size: 11px; }
-.node .title { font-size: 13px; font-weight: 600; }
-.edge { fill: none; stroke: var(--edge); stroke-width: 1.4; }
+#board { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+#views { flex: 1; min-height: 0; position: relative; display: flex; flex-direction: column; }
+#stage { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; position: relative; touch-action: pan-y; cursor: grab; }
+#stage.panning, #gstage.panning { cursor: grabbing; user-select: none; }
+#gstage { flex: 1; min-height: 0; position: relative; touch-action: none; cursor: grab; overflow: hidden; }
+#graph { display: block; width: 100%; height: 100%; }
+.dot-grid { fill: var(--grid); }
+.cluster-box { fill: var(--grid); fill-opacity: .35; stroke: var(--line); stroke-width: 1; }
+.card, .chip { cursor: pointer; }
+.card-box { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.card:hover .card-box, .chip:hover .chip-box { stroke: var(--edge); }
+.card.selected .card-box, .chip.selected .chip-box { stroke: var(--accent); stroke-width: 2; }
+.card-title { font-size: 13px; font-weight: 600; }
+.card-age { font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.chip-box { fill: var(--panel); stroke: var(--line); stroke-width: 1; }
+.chip-text { font-family: var(--mono); font-size: 11px; }
+.chain { stroke: var(--edge); stroke-width: 1.5; }
+.order { fill: none; stroke: var(--edge); stroke-width: 1; opacity: .7; }
+.edge.discovered { stroke-dasharray: 1.5 4; stroke-linecap: round; }
+#g-links.hovering .edge:not(.hot), #g-order.hovering .order { opacity: .12; }
+.edge.hot { stroke-width: 2.4; }
+#axis { position: sticky; top: 0; z-index: 1; display: block; }
+#rows { display: block; }
+#aging-box { border-top: 1px solid var(--line); background: var(--panel); flex: none; }
+#aging { display: block; width: 100%; height: 180px; }
+svg text { font-family: var(--sans); fill: var(--fg); }
+.panel-bg { fill: var(--panel); }
+.rule { stroke: var(--line); stroke-width: 1; }
+.col { stroke: var(--line); stroke-width: 1; opacity: .7; }
+.axis-label { font-size: 11.5px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+.head-label { font-size: 10.5px; fill: var(--muted); letter-spacing: .08em; font-weight: 600; }
+.now-line { stroke: var(--accent); stroke-width: 1.5; stroke-dasharray: 3 3; }
+.now-text { font-size: 11px; fill: var(--accent); font-weight: 600; }
+.group-bg { fill: var(--bg); }
+.group-name { font-size: 11.5px; font-weight: 700; letter-spacing: .06em; }
+.note { font-size: 11px; fill: var(--muted); }
+.rollup { font-family: var(--mono); font-size: 11.5px; fill: var(--muted); }
+.row { cursor: pointer; }
+.row .hit { fill: transparent; }
+.row:hover .hit { fill: var(--grid); opacity: .45; }
+.row.selected .hit { fill: var(--grid); opacity: 1; }
+.row-title { font-size: 13px; }
+.glyph { font-family: var(--mono); font-size: 13px; }
+.g-todo { fill: var(--todo); } .g-doing { fill: var(--doing); } .g-blocked { fill: var(--blocked); } .g-done { fill: var(--done); } .g-ready { fill: var(--accent); }
+.c-todo { color: var(--todo); } .c-doing { color: var(--doing); } .c-blocked { color: var(--blocked); } .c-done { color: var(--done); } .c-ready { color: var(--accent); }
+.seg-doing { fill: var(--doing); }
+.seg-blocked { fill: url(#hatch); stroke: var(--blocked); stroke-width: 1; }
+.hatch-line { stroke: var(--blocked); stroke-width: 1.5; }
+.seg-todo { stroke: var(--todo); stroke-width: 2; stroke-dasharray: 5 4; fill: none; }
+.seg-done { stroke: var(--done); stroke-width: 2; fill: none; }
+.seg-stale { stroke: var(--todo); stroke-width: 2; stroke-dasharray: 1 4; stroke-linecap: round; fill: none; }
+.start-dot { fill: var(--muted); }
+.tick-bg { fill: var(--panel); stroke: var(--done); stroke-width: 1.2; }
+.tick { font-size: 9px; font-weight: 700; fill: var(--done); }
+.close-mark { font-size: 12px; fill: var(--done); }
+.end-mark { font-size: 11px; }
+.after { font-size: 11px; font-family: var(--mono); }
+.version { font-size: 10.5px; font-family: var(--mono); fill: var(--muted); }
+.edge { fill: none; stroke: var(--accent); stroke-width: 1.6; }
 .edge.depends { stroke-dasharray: 6 4; }
-.edge.proposed { stroke-dasharray: 2 4; opacity: .7; }
-.edge.hot { stroke: var(--accent); stroke-width: 2.2; opacity: 1; }
+.edge.proposed { opacity: .6; }
+.arrow-head { fill: var(--accent); }
+.aging-dot { cursor: pointer; }
+.aging-label { font-size: 11px; fill: var(--muted); }
 #empty { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; text-align: center; pointer-events: none; }
-#empty div { max-width: 34ch; color: var(--muted); line-height: 1.5; }
+#empty div { max-width: 38ch; color: var(--muted); line-height: 1.5; }
 #empty strong { display: block; color: var(--fg); font-size: 16px; margin-bottom: 6px; text-wrap: balance; }
-aside { width: min(360px, 100%); border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+aside { width: min(380px, 100%); border-left: 1px solid var(--line); background: var(--panel); padding: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 12px; box-sizing: border-box; }
 aside h2 { font-size: 17px; margin: 0; text-wrap: balance; line-height: 1.3; }
+aside h3 { font-size: 10.5px; margin: 4px 0 0; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
 aside p { margin: 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 aside dl { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; margin: 0; font-size: 12px; }
 aside dt { color: var(--muted); text-transform: uppercase; letter-spacing: .06em; font-size: 10.5px; padding-top: 2px; }
 aside dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+aside ul { margin: 0; padding-left: 18px; font-size: 12.5px; line-height: 1.5; }
+aside ul.pieces { list-style: none; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.pieces li { display: grid; grid-template-columns: 16px 1fr; gap: 2px 6px; }
+.pieces .meta { grid-column: 2; color: var(--muted); font-size: 11px; font-family: var(--mono); overflow-wrap: anywhere; }
 .mono { font-family: var(--mono); font-size: 12px; }
-.links { display: flex; flex-direction: column; gap: 4px; }
-.links button { text-align: left; border: none; padding: 2px 0; background: none; color: var(--accent); }
+.copy { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.copy code { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 2px 6px; overflow-wrap: anywhere; }
+.copy button { font-size: 12px; padding: 2px 8px; }
+.hint { font-size: 11.5px; color: var(--muted); }
 .legend { font-size: 11.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 16px; border-top: 1px solid var(--line); background: var(--panel); }
-.legend svg { width: 28px; height: 8px; display: inline-block; vertical-align: middle; margin-right: 4px; }
+.legend svg { width: 28px; height: 10px; display: inline-block; vertical-align: middle; margin-right: 4px; }
 @media (max-width: 720px) {
   main { flex-direction: column; }
   aside { width: auto; border-left: none; border-top: 1px solid var(--line); max-height: 45%; }
@@ -86,56 +145,103 @@ aside dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 </style>
 
 <header>
-  <h1>Progress Web</h1>
-  <label class="mono" for="project" hidden>Project</label>
+  <h1 id="heading">Progress</h1>
   <select id="project" aria-label="Project"></select>
-  <div class="filters" id="filters" role="group" aria-label="Show statuses"></div>
+  <div class="seg" role="group" aria-label="View"><button id="view-timeline">timeline</button><button id="view-graph">graph</button></div>
+  <div class="seg" role="group" aria-label="Columns" id="modes"><button id="mode-day">day</button><button id="mode-week">week</button></div>
+  <div class="seg" role="group" aria-label="Requests shown"><button id="show-open">open</button><button id="show-all">all</button></div>
   <div class="spacer"></div>
   <div class="zoom">
     <button id="zoom-out" aria-label="Zoom out">−</button>
     <button id="zoom-in" aria-label="Zoom in">+</button>
-    <button id="fit">Fit</button>
-    <button id="relayout" title="Forget dragged positions for this project">Auto layout</button>
+    <button id="to-now" title="Show the last days up to now">Now</button>
+    <button id="reset-layout" title="Forget the dragged positions of this project">Reset layout</button>
   </div>
+  <span class="now-label" id="now-label"></span>
 </header>
 <main>
-  <div id="stage">
-    <svg id="svg" aria-label="Progress graph">
-      <defs>
-        <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><circle cx="1" cy="1" r="1" fill="var(--grid)"/></pattern>
-        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="var(--edge)"/></marker>
-      </defs>
-      <rect id="bg" width="100%" height="100%" fill="url(#grid)"/>
-      <g id="world"><g id="edges"></g><g id="nodes"></g></g>
-    </svg>
-    <div id="empty"><div><strong>No progress recorded yet</strong>When Claude finishes the work of a conversation, it adds a node here and links it to the earlier work it builds on.</div></div>
+  <div id="board">
+    <div id="views">
+      <div id="stage">
+        <svg id="axis" aria-hidden="true"></svg>
+        <svg id="rows" aria-label="Requests by line on a time axis">
+          <defs>
+            <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><line class="hatch-line" x1="0" y1="0" x2="0" y2="6"/></pattern>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrow-head" d="M0 0L10 5L0 10z"/></marker>
+            <clipPath id="time-clip"><rect id="time-clip-rect" x="0" y="0" width="0" height="0"/></clipPath>
+          </defs>
+          <g id="rows-g"></g>
+          <g id="links" clip-path="url(#time-clip)"></g>
+        </svg>
+      </div>
+      <div id="gstage" hidden>
+        <svg id="graph" aria-label="Requests as cards grouped by line, with their links">
+          <defs>
+            <pattern id="dots" width="24" height="24" patternUnits="userSpaceOnUse"><circle class="dot-grid" cx="1" cy="1" r="1"/></pattern>
+            <!-- Its own marker: one inside the hidden timeline svg would not draw. -->
+            <marker id="g-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="arrow-head" d="M0 0L10 5L0 10z"/></marker>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#dots)"/>
+          <g id="world"><g id="g-clusters"></g><g id="g-order"></g><g id="g-links"></g><g id="g-nodes"></g></g>
+        </svg>
+      </div>
+      <div id="empty" hidden><div></div></div>
+    </div>
+    <div id="aging-box"><svg id="aging" aria-label="Open requests by piece status and hours since their last event"></svg></div>
   </div>
   <aside id="detail" hidden></aside>
 </main>
-<div class="legend">
-  <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" stroke="var(--edge)" stroke-width="1.5"/></svg>builds on</span>
-  <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="6 4"/></svg>depends on</span>
-  <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="2 4"/></svg>proposed, not confirmed</span>
-  <span>Drag a node to move it · drag the canvas to pan · scroll to zoom</span>
+<div class="legend" id="legend-graph" hidden>
+  <span><svg viewBox="0 0 28 10"><line x1="0" y1="5" x2="28" y2="5" class="edge"/></svg>builds on</span>
+  <span><svg viewBox="0 0 28 10"><line x1="0" y1="5" x2="28" y2="5" class="edge depends"/></svg>depends on, faded while not confirmed</span>
+  <span><svg viewBox="0 0 28 10"><line x1="0" y1="5" x2="28" y2="5" class="edge discovered"/></svg>found while working on</span>
+  <span><svg viewBox="0 0 28 10"><line x1="0" y1="5" x2="28" y2="5" class="order"/></svg>next in its line</span>
+  <span>◆ closed · ready: every piece done · Nd quiet for N days</span>
+  <span>Drag a card to move it · drag the background to pan · ctrl-scroll to zoom · hover a card for its links</span>
+</div>
+<div class="legend" id="legend-timeline">
+  <span><svg viewBox="0 0 28 10"><rect x="0" y="1" width="28" height="8" rx="2" class="seg-doing"/></svg>a piece doing</span>
+  <span><svg viewBox="0 0 28 10"><line x1="0" y1="5" x2="28" y2="5" class="seg-todo"/></svg>only todo</span>
+  <span><svg viewBox="0 0 28 10"><rect x="0" y="1" width="28" height="8" class="seg-blocked"/></svg>a piece blocked</span>
+  <span><svg viewBox="0 0 28 10"><line x1="0" y1="5" x2="28" y2="5" class="seg-done"/></svg>every piece done</span>
+  <span>✓ a piece done · ◆ closed · Nd quiet for N days</span>
+  <span>Drag or shift-scroll to pan · ctrl-scroll to zoom · hover a request for its links</span>
 </div>
 
 <script>
-const STATUSES = [
-  { key: 'doing', label: 'Doing' },
-  { key: 'blocked', label: 'Blocked' },
-  { key: 'todo', label: 'To do' },
-  { key: 'done', label: 'Done' },
-]
-const NODE_W = 232, NODE_H = 66, COL_GAP = 96, ROW_GAP = 26
 const NS = 'http://www.w3.org/2000/svg'
+const HOUR = 3600 * 1000, DAY = 24 * HOUR
+// An open request with no event on it or its pieces this long is stale, as the plugin folds it.
+const STALE_MS = 72 * HOUR
+const LABEL_W = 340, AXIS_H = 34, GROUP_H = 32, ROW_H = 30, AGING_H = 180
+// The default view per mode: the last 7 days, or the last 8 weeks.
+const SPANS = { day: 7 * DAY, week: 56 * DAY }
+const MIN_SPAN = 6 * HOUR, MAX_SPAN = 730 * DAY
+// Room after now in a view that follows now, as a share of its span, for the labels after an open bar.
+const NOW_ROOM = 0.08
+// The graph, in its own units before zoom: a card, a version chip of a series, a lane of cards in a line's band.
+const CARD_W = 240, CARD_H = 64, CHIP_W = 66, CHIP_H = 24, CHIP_GAP = 14, CHAIN_H = 44, LANE_H = 84
+// A day holding a start is DAY_W wide; a run of n empty days GAP_W · log2(n + 1).
+const DAY_W = 300, GAP_W = 28
+// A cluster's padding, the room for its name above its first lane, and the space between bands.
+const PAD = 16, BAND_HEAD = 34, BAND_GAP = 44
+const MIN_K = 0.2, MAX_K = 2.5
+const NODE_KEYS = ['title', 'summary', 'status', 'kind', 'done_when', 'builds_on', 'depends_on', 'request', 'discovered_from']
+const REQUEST_KEYS = ['title', 'acceptance', 'status', 'line']
+const LINE_KEYS = ['name', 'definition', 'keys', 'status', 'merged_into']
+const GLYPHS = { todo: '◌', doing: '▸', blocked: '⊘', done: '✓', ready: '?' }
 const $ = id => document.getElementById(id)
 
 const state = {
-  db: null, projects: [], project: null,
-  nodes: new Map(), edges: [], positions: new Map(),
-  shown: new Set(STATUSES.map(s => s.key)),
-  view: { x: 40, y: 40, k: 1 }, selected: null, unsubs: [],
+  db: null, projects: [], project: null, docs: [], board: { nodes: new Map(), requests: [], byId: new Map(), lines: new Map() },
+  view: { mode: 'day', span: SPANS.day, end: null, kind: 'timeline' }, filter: 'open',
+  // The graph's pan and zoom, null until it is first fitted; dragged positions by request id.
+  graph: null, positions: new Map(),
+  selected: null, hovered: null, unsubs: [], isUnavailable: false,
 }
+// What the last drawing placed, for the hover links and the pointer.
+let drawn = { sc: null, rowY: new Map() }
+let graphDrawn = { items: [], at: new Map(), boxes: new Map(), clusters: [] }
 
 const store = {
   get(key) { try { return JSON.parse(localStorage.getItem(key)) } catch { return null } },
@@ -149,286 +255,866 @@ function el(name, attrs = {}, text) {
   return node
 }
 
-const createdOf = n => Number(n.created ?? n.createdAt ?? n.at ?? 0)
-const dateText = ms => ms ? new Date(ms).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''
-const clip = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+function html(name, props = {}, ...children) {
+  const node = Object.assign(document.createElement(name), props)
+  node.append(...children)
+  return node
+}
 
-// Columns by the longest chain of links from a root; within a column, oldest first.
-function autoLayout(nodes, edges) {
-  const parents = new Map(nodes.map(n => [n.id, []]))
-  for (const e of edges) if (parents.has(e.to) && parents.has(e.from)) parents.get(e.from).push(e.to)
-  const depth = new Map()
-  const visit = (id, seen) => {
-    if (depth.has(id)) return depth.get(id)
-    if (seen.has(id)) return 0
-    seen.add(id)
-    const d = Math.max(-1, ...parents.get(id).map(p => visit(p, seen))) + 1
-    depth.set(id, d)
-    return d
+const isRecord = v => typeof v === 'object' && v !== null && !Array.isArray(v)
+const pick = (fields, keys) => Object.fromEntries(keys.filter(k => k in fields).map(k => [k, fields[k]]))
+// Display width: a CJK or other wide character counts two.
+const widthOf = ch => (ch.codePointAt(0) >= 0x2e80 ? 2 : 1)
+function clip(s, units) {
+  let used = 0, out = ''
+  for (const ch of String(s)) {
+    if (used + widthOf(ch) > units - 1) return out + '…'
+    used += widthOf(ch); out += ch
   }
-  nodes.forEach(n => visit(n.id, new Set()))
-  const cols = new Map()
-  for (const n of [...nodes].sort((a, b) => createdOf(a) - createdOf(b))) {
-    const d = depth.get(n.id)
-    if (!cols.has(d)) cols.set(d, [])
-    cols.get(d).push(n)
+  return out
+}
+const timeText = ms => new Date(ms).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+const ageText = ms => (ms < HOUR ? `${Math.max(1, Math.floor(ms / 60000))}m` : ms < DAY ? `${Math.floor(ms / HOUR)}h` : `${Math.floor(ms / DAY)}d`)
+
+/** The plugin's titlePattern: lower-case, versions `<ver>`, `#` refs `#<n>`, other digit runs `<n>`, whitespace single. */
+const titlePattern = title => String(title).toLowerCase().replace(/\bv?\d+(?:\.\d+)+/g, '<ver>').replace(/#\d+/g, '#<n>').replace(/\d+/g, '<n>').replace(/\s+/g, ' ').trim()
+const versionOf = title => /\bv?\d+(?:\.\d+)+/.exec(String(title))?.[0] ?? ''
+
+// Snapshot docs, `s<sync time>-<id>` and `b<sync time>-<id>`, hold the item's fields as of that sync at the item's own `at`:
+// they fold at the sync's time, over the events they already hold; their `updatedAt` and a request's `closedAt` carry its times.
+const snapshotAt = doc => { const m = /^[sb](\d+)-/.exec(doc._doc ?? ''); return m ? Number(m[1]) : null }
+const timeOf = v => (typeof v === 'number' && Number.isFinite(v) ? v : null)
+
+/**
+ * The board the docs make, folded as the plugin folds it, in time order and by `seq` within one call: nodes from add and update
+ * events (an update with no add before it makes its node only when it carries a title), requests from request events with their
+ * pieces by `fields.request`, lines from line events. A piece's status history and the times it went done come from its own
+ * events; a piece a snapshot alone says done went done at the snapshot's `updatedAt`.
+ */
+function fold(docs) {
+  const nodes = new Map(), requests = new Map(), lines = new Map()
+  const keyed = docs.filter(isRecord).map(d => ({ d, t: snapshotAt(d) ?? Number(d.at ?? 0), seq: Number(d.seq) || 0 })).sort((a, b) => a.t - b.t || a.seq - b.seq)
+  for (const { d } of keyed) {
+    const at = Number(d.at ?? 0), isSnapshot = snapshotAt(d) !== null, fields = isRecord(d.fields) ? d.fields : {}
+    if ((d.type === 'add' || d.type === 'update') && typeof d.node === 'string') {
+      let n = nodes.get(d.node)
+      if (!n) {
+        if (d.type !== 'add' && typeof fields.title !== 'string') continue
+        n = { id: d.node, title: d.node, status: 'todo', request: '', discovered_from: '', builds_on: [], depends_on: [], at, updated: at, commit: null, session: '', history: [], doneAts: [], snapped: null }
+        nodes.set(d.node, n)
+      }
+      Object.assign(n, pick(fields, NODE_KEYS))
+      if (d.type === 'add') n.at = Math.min(n.at, at)
+      if (isSnapshot) {
+        if (n.history.length === 0 && typeof fields.status === 'string') n.history.push({ at: n.at, status: fields.status, isSnapshot: true })
+        const updatedAt = timeOf(d.updatedAt)
+        if (updatedAt !== null) { n.updated = Math.max(n.updated, updatedAt); n.snapped = updatedAt }
+        continue
+      }
+      n.updated = Math.max(n.updated, at)
+      n.commit = d.commit ?? n.commit
+      if (d.type === 'add' && typeof d.session === 'string') n.session = d.session
+      if (typeof fields.status === 'string') n.history.push({ at, status: fields.status })
+      if (d.type === 'update' && fields.status === 'done') n.doneAts.push(at)
+    } else if (d.type === 'request' && typeof d.request === 'string') {
+      const r = requests.get(d.request) ?? { id: d.request, title: d.request, acceptance: [], status: 'open', resolution: null, line: '', at, updated: at, session: typeof d.session === 'string' ? d.session : '', closedAt: null }
+      // Reopened: the resolution it had no longer holds.
+      r.resolution = isRecord(fields.resolution) ? fields.resolution : fields.status === 'open' ? null : r.resolution
+      Object.assign(r, pick(fields, REQUEST_KEYS))
+      r.at = Math.min(r.at, at)
+      r.updated = Math.max(r.updated, at, timeOf(d.updatedAt) ?? at)
+      if (!isSnapshot && (fields.status === 'closed' || fields.status === 'dropped')) r.closedAt = at
+      if (!isSnapshot && fields.status === 'open') r.closedAt = null
+      if (isSnapshot && (fields.status === 'closed' || fields.status === 'dropped') && timeOf(d.closedAt) !== null) r.closedAt = timeOf(d.closedAt)
+      requests.set(d.request, r)
+    } else if (d.type === 'line' && typeof d.line === 'string') {
+      const l = lines.get(d.line) ?? { id: d.line, name: '', definition: '', keys: {}, status: 'active', merged_into: '', at, updated: at }
+      Object.assign(l, pick(fields, LINE_KEYS))
+      l.at = Math.min(l.at, at)
+      if (!isSnapshot) l.updated = Math.max(l.updated, at)
+      lines.set(d.line, l)
+    }
   }
+  for (const n of nodes.values()) {
+    n.history.sort((a, b) => a.at - b.at)
+    if (n.status !== 'done' || n.doneAts.length > 0 || n.snapped === null) continue
+    n.doneAts.push(n.snapped)
+    // Only the snapshot's word for it: todo until the time it went done, not done since it was added.
+    if (n.history.length === 1 && n.history[0].isSnapshot && n.snapped > n.at) n.history = [{ at: n.at, status: 'todo' }, { at: n.snapped, status: 'done' }]
+  }
+  const now = Date.now()
+  const list = [...requests.values()].map(r => {
+    const pieces = [...nodes.values()].filter(n => n.request === r.id).sort((a, b) => a.at - b.at)
+    const live = pieces.filter(n => n.status !== 'dropped')
+    const counted = live.filter(n => !n.discovered_from)
+    const done = counted.filter(n => n.status === 'done').length
+    const updated = Math.max(r.updated, ...pieces.map(n => n.updated))
+    const isReady = counted.length > 0 && done === counted.length
+    const st = r.status !== 'open' ? r.status : isReady ? 'ready' : now - updated >= STALE_MS ? 'stale' : 'open'
+    const start = Math.min(r.at, ...pieces.map(n => n.at))
+    return { ...r, pieces, live, counted, followUps: live.filter(n => n.discovered_from), done, total: counted.length, updated, state: st, start, closedAt: st === 'closed' ? (r.closedAt ?? updated) : null }
+  })
+  for (const l of lines.values()) l.updated = Math.max(l.updated, ...list.filter(r => r.line === l.id).map(r => r.updated))
+  return { nodes, requests: list, byId: new Map(list.map(r => [r.id, r])), lines }
+}
+
+/** A request's glyph and colour key: closed ✓, ready ?, else ⊘ with a blocked piece, ▸ with a doing one, ◌ with neither. */
+function glyphOf(r) {
+  if (r.state === 'closed') return 'done'
+  if (r.state === 'ready') return 'ready'
+  return r.live.some(n => n.status === 'blocked') ? 'blocked' : r.live.some(n => n.status === 'doing') ? 'doing' : 'todo'
+}
+
+const STATE_WORDS = { open: 'open', ready: 'ready: every piece done, waiting for the person', stale: 'stale: no event for 72 hours', closed: 'closed', dropped: 'dropped' }
+
+/** The groups drawn: one per active line, newest activity first (retired ones too under all), then the requests in no drawn line. */
+function groupsOf(board) {
+  const isShown = r => r.state !== 'dropped' && (state.filter === 'all' || r.state !== 'closed')
+  const recency = r => (r.state === 'closed' ? r.closedAt : r.updated)
+  const order = (a, b) => (a.state === 'closed') - (b.state === 'closed') || recency(b) - recency(a)
+  const placed = new Set(), groups = []
+  const lines = [...board.lines.values()].filter(l => l.status === 'active' || (state.filter === 'all' && !l.merged_into)).sort((a, b) => b.updated - a.updated)
+  for (const line of lines) {
+    const rows = rowsOf(board.requests.filter(r => r.line === line.id && r.state !== 'dropped'), isShown, order)
+    if (rows.length === 0) continue
+    rows.forEach(row => row.requests.forEach(r => placed.add(r.id)))
+    groups.push({ line: line.id, name: line.name || line.id, note: line.status === 'retired' ? 'retired' : '', rows, shown: rows.flatMap(row => row.requests.filter(isShown)) })
+  }
+  const rest = board.requests.filter(r => !placed.has(r.id) && isShown(r)).sort(order)
+  if (rest.length > 0) groups.push({ line: '', name: 'No line', note: '', rows: rest.map(r => ({ kind: 'request', request: r, requests: [r] })), shown: rest })
+  return groups
+}
+
+/** A line's rows: a series (3 or more requests whose shared title pattern holds a version) on one row, every other shown request on its own. */
+function rowsOf(members, isShown, order) {
+  const byPattern = new Map()
+  for (const r of members) {
+    const p = titlePattern(r.title)
+    if (p.includes('<ver>')) byPattern.set(p, [...(byPattern.get(p) ?? []), r])
+  }
+  const inSeries = new Set(), rows = []
+  for (const [pattern, list] of byPattern) {
+    if (list.length < 3) continue
+    list.forEach(r => inSeries.add(r.id))
+    if (!list.some(isShown)) continue
+    const main = [...list].sort(order)[0]
+    rows.push({ kind: 'series', pattern, request: main, requests: [...list].sort((a, b) => a.start - b.start) })
+  }
+  for (const r of members) if (!inSeries.has(r.id) && isShown(r)) rows.push({ kind: 'request', request: r, requests: [r] })
+  return rows.sort((a, b) => order(a.request, b.request))
+}
+
+function scaleOf(width, now) {
+  const { span } = state.view
+  const end = state.view.end ?? now + span * NOW_ROOM
+  const start = end - span
+  const w = Math.max(1, width - LABEL_W)
+  return { start, end, w, x: t => LABEL_W + ((t - start) / span) * w, t: px => start + ((px - LABEL_W) / w) * span }
+}
+
+/** Local midnights (day) or Monday midnights (week) from before `start` through `end`. */
+function columnsOf(start, end, mode) {
+  const d = new Date(start)
+  d.setHours(0, 0, 0, 0)
+  if (mode === 'week') d.setDate(d.getDate() - ((d.getDay() + 6) % 7))
+  const out = []
+  while (d.getTime() <= end && out.length < 800) { out.push(d.getTime()); d.setDate(d.getDate() + (mode === 'week' ? 7 : 1)) }
+  return out
+}
+
+const columnLabel = (ms, mode) => {
+  const d = new Date(ms)
+  return mode === 'week' ? d.toLocaleDateString(undefined, { day: '2-digit', month: 'short' }) : `${d.toLocaleDateString(undefined, { weekday: 'short' })} ${String(d.getDate()).padStart(2, '0')}`
+}
+
+function rollupBar(done, total) {
+  const cells = Math.min(total, 8), filled = total === 0 ? 0 : Math.round((done / total) * cells)
+  return total === 0 ? '' : `${'▰'.repeat(filled)}${'▱'.repeat(cells - filled)} ${done}/${total}`
+}
+
+function drawAxis(width, sc, cols, now) {
+  const svg = $('axis')
+  svg.setAttribute('width', width); svg.setAttribute('height', AXIS_H)
+  const defs = el('defs'), area = el('clipPath', { id: 'axis-clip' }), time = el('g', { 'clip-path': 'url(#axis-clip)' })
+  area.append(el('rect', { x: LABEL_W, y: 0, width: sc.w, height: AXIS_H }))
+  defs.append(area)
+  svg.replaceChildren(defs, el('rect', { class: 'panel-bg', width, height: AXIS_H }), time)
+  // Every step-th column labelled, so labels keep 48 px apart.
+  const step = Math.max(1, Math.ceil(48 / (((state.view.mode === 'week' ? 7 : 1) * DAY * sc.w) / state.view.span)))
+  cols.forEach((t, i) => {
+    time.append(el('line', { class: 'col', x1: sc.x(t), x2: sc.x(t), y1: 6, y2: AXIS_H }))
+    if (i % step === 0) time.append(el('text', { class: 'axis-label', x: sc.x(t) + 6, y: 21 }, columnLabel(t, state.view.mode)))
+  })
+  time.append(el('line', { class: 'now-line', x1: sc.x(now), x2: sc.x(now), y1: 4, y2: AXIS_H }), el('text', { class: 'now-text', x: sc.x(now) + 5, y: 12 }, 'now'))
+  svg.append(el('text', { class: 'head-label', x: 16, y: 21 }, 'LINE / REQUEST'), el('line', { class: 'rule', x1: 0, x2: width, y1: AXIS_H - 0.5, y2: AXIS_H - 0.5 }), el('line', { class: 'rule', x1: LABEL_W, x2: LABEL_W, y1: 0, y2: AXIS_H }))
+}
+
+/** A piece's status at `t`: its last status event by then, else the first it had. */
+function statusAt(n, t) {
+  let s = n.history[0]?.status ?? n.status
+  for (const h of n.history) { if (h.at > t) break; s = h.status }
+  return s
+}
+
+/** What a request's bar shows at `t`: blocked with a blocked piece, doing with a doing one, done when every counted piece is, else todo. */
+function barState(r, t) {
+  const here = r.pieces.filter(n => n.at <= t).map(n => ({ n, s: statusAt(n, t) })).filter(({ s }) => s !== 'dropped')
+  if (here.some(({ s }) => s === 'blocked')) return 'blocked'
+  if (here.some(({ s }) => s === 'doing')) return 'doing'
+  const counted = here.filter(({ n }) => !n.discovered_from)
+  return counted.length > 0 && counted.every(({ s }) => s === 'done') ? 'done' : 'todo'
+}
+
+function drawBar(g, r, cy, sc, now) {
+  const end = r.state === 'closed' ? r.closedAt : now
+  const quiet = r.state === 'stale' ? Math.max(r.start, r.updated) : end
+  const cuts = [...new Set([r.start, ...r.pieces.flatMap(n => n.history.map(h => h.at)).filter(t => t > r.start && t < quiet), quiet])].sort((a, b) => a - b)
+  const parts = []
+  for (let i = 0; i < cuts.length - 1; i++) {
+    const s = barState(r, cuts[i])
+    if (parts.length > 0 && parts[parts.length - 1].s === s) parts[parts.length - 1].b = cuts[i + 1]
+    else parts.push({ s, a: cuts[i], b: cuts[i + 1] })
+  }
+  if (quiet < end) parts.push({ s: 'stale', a: quiet, b: end })
+  for (const { s, a, b } of parts) {
+    const x1 = sc.x(a), x2 = Math.max(sc.x(b), x1 + 1)
+    g.append(s === 'doing' || s === 'blocked'
+      ? el('rect', { class: `seg-${s}`, x: x1, y: cy - 4, width: x2 - x1, height: 8, rx: s === 'doing' ? 2 : 0 })
+      : el('line', { class: `seg-${s}`, x1, x2, y1: cy, y2: cy }))
+  }
+  g.append(el('circle', { class: 'start-dot', cx: sc.x(r.start), cy, r: 3.5 }))
+  for (const n of r.pieces) {
+    for (const t of n.doneAts) {
+      if (t < r.start || t > end) continue
+      const tick = el('g', {})
+      tick.append(el('circle', { class: 'tick-bg', cx: sc.x(t), cy, r: 6 }), el('text', { class: 'tick', x: sc.x(t), y: cy + 3, 'text-anchor': 'middle' }, '✓'), el('title', {}, `${n.title} · done ${timeText(t)}`))
+      g.append(tick)
+    }
+  }
+  if (r.state === 'closed') {
+    const mark = el('text', { class: 'close-mark', x: sc.x(end), y: cy + 4, 'text-anchor': 'middle' }, '◆')
+    mark.append(el('title', {}, `closed ${timeText(end)}${r.resolution ? ` by ${r.resolution.by}: ${r.resolution.evidence}` : ''}`))
+    g.append(mark)
+    return sc.x(end) + 8
+  }
+  const glyph = glyphOf(r)
+  g.append(el('text', { class: `end-mark g-${glyph === 'ready' ? 'done' : glyph}`, x: sc.x(end) + 1, y: cy + 4 }, '▸'))
+  const after = r.state === 'ready' ? ['ready', 'g-ready'] : r.state === 'stale' ? [ageText(now - r.updated), 'g-todo'] : null
+  if (after) g.append(el('text', { class: `after ${after[1]}`, x: sc.x(end) + 12, y: cy + 4 }, after[0]))
+  return sc.x(end) + 12
+}
+
+/** A series row: each request's ◆ or open bar with its version, in a group that selects that request. */
+function drawSeries(g, row, cy, sc, now) {
+  for (const r of row.requests) {
+    if (r.state === 'dropped') continue
+    const one = el('g', {})
+    one.dataset.request = r.id
+    const x = r.state === 'closed' ? sc.x(r.closedAt) : sc.x(r.start)
+    if (r.state === 'closed') {
+      const mark = el('text', { class: 'close-mark', x, y: cy + 4, 'text-anchor': 'middle' }, '◆')
+      mark.append(el('title', {}, `${r.title} · closed ${timeText(r.closedAt)}${r.resolution ? ` by ${r.resolution.by}: ${r.resolution.evidence}` : ''}`))
+      one.append(mark)
+    } else {
+      drawBar(one, r, cy, sc, now)
+    }
+    one.append(el('text', { class: 'version', x: x + (r.state === 'closed' ? 0 : 4), y: cy - 7, 'text-anchor': r.state === 'closed' ? 'middle' : 'start' }, versionOf(r.title)))
+    g.append(one)
+  }
+}
+
+function drawRows(width, sc, cols, groups, now) {
+  const svg = $('rows'), g = $('rows-g')
+  const height = groups.reduce((sum, one) => sum + GROUP_H + one.rows.length * ROW_H, 0) + 12
+  svg.setAttribute('width', width); svg.setAttribute('height', height)
+  $('time-clip-rect').setAttribute('x', LABEL_W); $('time-clip-rect').setAttribute('width', sc.w); $('time-clip-rect').setAttribute('height', height)
+  g.replaceChildren(el('rect', { class: 'panel-bg', width: LABEL_W, height }))
+  const time = el('g', { 'clip-path': 'url(#time-clip)' })
+  for (const t of cols) time.append(el('line', { class: 'col', x1: sc.x(t), x2: sc.x(t), y1: 0, y2: height }))
+  time.append(el('line', { class: 'now-line', x1: sc.x(now), x2: sc.x(now), y1: 0, y2: height }))
+  g.append(time, el('line', { class: 'rule', x1: LABEL_W, x2: LABEL_W, y1: 0, y2: height }))
+  const rowY = new Map()
+  let y = 0
+  for (const group of groups) {
+    const head = el('g', {})
+    const done = group.shown.reduce((s, r) => s + r.done, 0), total = group.shown.reduce((s, r) => s + r.total, 0)
+    head.append(
+      el('rect', { class: 'group-bg', x: 0, y, width: LABEL_W, height: GROUP_H }),
+      el('line', { class: 'rule', x1: 0, x2: width, y1: y + 0.5, y2: y + 0.5 }),
+      el('text', { class: 'group-name', x: 16, y: y + 20 }, clip(group.name.toUpperCase(), 22)),
+      el('text', { class: 'rollup', x: LABEL_W - 12, y: y + 20, 'text-anchor': 'end' }, rollupBar(done, total)),
+    )
+    if (group.note) head.append(el('text', { class: 'note', x: 16 + Math.min(22, [...group.name].reduce((s, ch) => s + widthOf(ch), 0)) * 8 + 8, y: y + 20 }, group.note))
+    g.append(head)
+    y += GROUP_H
+    for (const row of group.rows) {
+      const r = row.request, cy = y + ROW_H / 2, glyph = glyphOf(r)
+      const title = row.kind === 'series' ? row.pattern.replace(/<ver>/g, '…') : r.title
+      const node = el('g', { class: `row${row.requests.some(one => one.id === state.selected) ? ' selected' : ''}`, tabindex: '0', role: 'button', 'aria-label': `${title}, ${r.state}` })
+      node.dataset.request = r.id
+      const bars = el('g', { 'clip-path': 'url(#time-clip)' })
+      node.append(
+        el('rect', { class: 'hit', x: 0, y, width, height: ROW_H }),
+        el('text', { class: `glyph g-${glyph}`, x: 22, y: cy + 4.5 }, GLYPHS[glyph]),
+        el('text', { class: 'row-title', x: 40, y: cy + 4.5 }, clip(title, row.kind === 'series' ? 26 : 33)),
+        el('text', { class: 'rollup', x: LABEL_W - 12, y: cy + 4, 'text-anchor': 'end' }, r.state === 'closed' && row.kind === 'series' ? '' : `${r.done}/${r.total}${r.followUps.length ? ` +${r.followUps.length}` : ''}`),
+        el('title', {}, row.kind === 'series' ? `${title} (series of ${row.requests.length})` : r.title),
+        bars,
+      )
+      if (row.kind === 'series') {
+        node.append(el('text', { class: 'note', x: 40 + Math.min(26, [...title].reduce((s, ch) => s + widthOf(ch), 0)) * 7.4 + 6, y: cy + 4 }, 'series'))
+        drawSeries(bars, row, cy, sc, now)
+      } else {
+        drawBar(bars, r, cy, sc, now)
+      }
+      node.addEventListener('mouseenter', () => { state.hovered = row.requests.map(one => one.id); drawLinks() })
+      node.addEventListener('mouseleave', () => { state.hovered = null; drawLinks() })
+      node.addEventListener('keydown', ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); select(r.id) } })
+      g.append(node)
+      row.requests.forEach(one => rowY.set(one.id, cy))
+      y += ROW_H
+    }
+  }
+  drawn = { sc, rowY }
+  drawLinks()
+}
+
+/** While a request is hovered: an arrow from each piece another piece builds on or depends on to that piece, where either is the request's; each at its last done tick, else where it was added. */
+function drawLinks() {
+  const g = $('links')
+  g.replaceChildren()
+  if (!state.hovered || !drawn.sc) return
+  const hovered = new Set(state.hovered), { sc, rowY } = drawn
+  const point = n => (rowY.has(n.request) ? { x: sc.x(n.doneAts[n.doneAts.length - 1] ?? n.at), y: rowY.get(n.request) } : null)
+  for (const n of state.board.nodes.values()) {
+    if (n.status === 'dropped') continue
+    const links = [
+      ...(Array.isArray(n.builds_on) ? n.builds_on : []).map(id => ({ id, kind: 'builds' })),
+      ...(Array.isArray(n.depends_on) ? n.depends_on : []).filter(isRecord).map(d => ({ id: d.id, kind: 'depends', confirmed: d.confirmed === true })),
+    ]
+    for (const link of links) {
+      const m = state.board.nodes.get(link.id)
+      if (!m || m.status === 'dropped' || !(hovered.has(n.request) || hovered.has(m.request))) continue
+      const a = point(m), b = point(n)
+      if (!a || !b) continue
+      const dx = Math.max(30, Math.abs(b.x - a.x) / 2)
+      g.append(el('path', { class: `edge${link.kind === 'depends' ? ' depends' : ''}${link.confirmed === false ? ' proposed' : ''}`, d: `M${a.x} ${a.y} C${a.x + dx} ${a.y} ${b.x - dx} ${b.y} ${b.x} ${b.y}`, 'marker-end': 'url(#arrow)' }))
+    }
+  }
+}
+
+/** Open requests: x their furthest piece status, y the hours since their last event on a square-root scale. */
+function drawAging(now) {
+  const svg = $('aging'), width = $('aging-box').clientWidth
+  svg.replaceChildren()
+  const open = state.board.requests.filter(r => r.state === 'open' || r.state === 'ready' || r.state === 'stale')
+  const cats = ['todo', 'doing', 'blocked', 'ready']
+  const left = 72, right = 24, top = 26, bottom = 26
+  const plotH = AGING_H - top - bottom, colW = (width - left - right) / cats.length
+  const hours = r => (now - r.updated) / HOUR
+  const maxH = Math.max(72, ...open.map(hours))
+  const y = h => top + (1 - Math.sqrt(Math.min(h, maxH) / maxH)) * plotH
+  svg.append(el('text', { class: 'head-label', x: 16, y: 16 }, 'AGING (open only)'))
+  for (const h of [0, 1, 6, 24, 72, 168, 336, 720, 2160].filter(h => h <= maxH)) {
+    svg.append(el('line', { class: 'col', x1: left, x2: width - right, y1: y(h), y2: y(h) }), el('text', { class: 'axis-label', x: left - 8, y: y(h) + 4, 'text-anchor': 'end' }, h < 24 ? `${h}h` : `${h / 24}d`))
+  }
+  cats.forEach((c, i) => svg.append(el('text', { class: 'axis-label', x: left + colW * (i + 0.5), y: AGING_H - 8, 'text-anchor': 'middle' }, c)))
+  for (const r of open) {
+    const c = r.state === 'ready' ? 'ready' : glyphOf(r)
+    // A steady spread inside the column from the id, so a point stays put between drawings.
+    const spread = ([...r.id].reduce((s, ch) => (s * 31 + ch.charCodeAt(0)) % 997, 7) / 997 - 0.5) * colW * 0.6
+    const x = left + colW * (cats.indexOf(c) + 0.5) + spread, cy = y(hours(r))
+    const dot = el('g', { class: 'aging-dot', tabindex: '0', role: 'button', 'aria-label': `${r.title}, ${ageText(now - r.updated)} since its last event` })
+    dot.dataset.request = r.id
+    dot.append(el('circle', { class: `g-${c}`, cx: x, cy, r: r.id === state.selected ? 6 : 4.5 }), el('title', {}, `${r.title} · ${ageText(now - r.updated)} since its last event`))
+    if (hours(r) >= 24) dot.append(el('text', { class: 'aging-label', x: x + 8, y: cy + 4 }, clip(r.title, 24)))
+    svg.append(dot)
+  }
+}
+
+/** The graph's items: a card for each request on its own row, a chain of version chips for each series; `group` its line's index. */
+function graphItems(groups) {
+  const items = []
+  groups.forEach((group, gi) => {
+    for (const row of group.rows) {
+      if (row.kind === 'series') {
+        const list = row.requests.filter(r => r.state !== 'dropped')
+        items.push({ key: list[0].id, kind: 'chain', row, requests: list, group: gi, start: list[0].start, w: list.length * CHIP_W + (list.length - 1) * CHIP_GAP, h: CHAIN_H })
+      } else {
+        items.push({ key: row.request.id, kind: 'card', row, requests: [row.request], group: gi, start: row.request.start, w: CARD_W, h: CARD_H })
+      }
+    }
+  })
+  return items
+}
+
+const midnight = t => { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime() }
+
+/** Where items sit until dragged: x from the day they started, empty days squeezed; y in their line's band, in the timeline's line order, one that would overlap an earlier one pushed a lane down. */
+function defaultLayout(items, groups) {
+  const days = [...new Set(items.map(i => midnight(i.start)))].sort((a, b) => a - b)
+  const dayX = new Map()
+  let x = 0
+  days.forEach((d, n) => {
+    if (n > 0) x += DAY_W + GAP_W * Math.log2(1 + Math.max(0, Math.round((d - days[n - 1]) / DAY) - 1))
+    dayX.set(d, x)
+  })
   const at = new Map()
-  for (const [d, list] of cols) list.forEach((n, i) => at.set(n.id, { x: d * (NODE_W + COL_GAP), y: i * (NODE_H + ROW_GAP) }))
+  let top = 0
+  groups.forEach((group, gi) => {
+    // Within its day an item moves right by the hour, as far as a card still clears the next day.
+    const own = items.filter(i => i.group === gi).map(i => ({ i, x: dayX.get(midnight(i.start)) + ((i.start - midnight(i.start)) / DAY) * (DAY_W - CARD_W - 24) })).sort((a, b) => a.x - b.x)
+    const lanes = []
+    for (const { i, x } of own) {
+      let lane = lanes.findIndex(end => end <= x)
+      if (lane < 0) { lane = lanes.length; lanes.push(0) }
+      lanes[lane] = x + i.w + 24
+      at.set(i.key, { x, y: top + BAND_HEAD + lane * LANE_H })
+    }
+    top += BAND_HEAD + Math.max(1, lanes.length) * LANE_H + BAND_GAP
+  })
   return at
 }
 
-function visibleNodes() { return [...state.nodes.values()].filter(n => state.shown.has(n.status)) }
-
-function layout() {
-  const nodes = [...state.nodes.values()]
-  const auto = autoLayout(nodes, state.edges)
-  const at = new Map()
-  for (const n of nodes) at.set(n.id, state.positions.get(n.id) ?? auto.get(n.id))
-  return at
+/** Links between drawn requests, one per pair and kind: builds on toward the later one, depends on toward the dependent (confirmed when any is), found while working on toward the found one. */
+function requestLinks(drawnIds) {
+  const { nodes, byId } = state.board, links = new Map()
+  const add = (from, to, kind, confirmed = true) => {
+    if (from === to || !drawnIds.has(from) || !drawnIds.has(to)) return
+    const key = `${kind} ${from} ${to}`
+    links.set(key, { from, to, kind, confirmed: confirmed || links.get(key)?.confirmed === true })
+  }
+  const live = id => { const m = nodes.get(id); return m && m.status !== 'dropped' && m.request ? m : null }
+  for (const n of nodes.values()) {
+    if (n.status === 'dropped' || !n.request) continue
+    for (const id of Array.isArray(n.builds_on) ? n.builds_on : []) {
+      const a = byId.get(live(id)?.request), b = byId.get(n.request)
+      if (a && b) a.start <= b.start ? add(a.id, b.id, 'builds') : add(b.id, a.id, 'builds')
+    }
+    for (const d of (Array.isArray(n.depends_on) ? n.depends_on : []).filter(isRecord)) {
+      const m = live(d.id)
+      if (m) add(m.request, n.request, 'depends', d.confirmed === true)
+    }
+    const source = live(n.discovered_from)
+    if (source) add(source.request, n.request, 'discovered')
+  }
+  return [...links.values()]
 }
 
-function edgePath(a, b) {
-  const x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2
-  const dx = Math.max(40, Math.abs(x2 - x1) / 2)
-  return `M${x1} ${y1} C${x1 + dx} ${y1} ${x2 - dx} ${y2} ${x2} ${y2}`
+const isApart = (a, b) => b.x >= a.x + a.w + 12 || a.x >= b.x + b.w + 12
+
+/** A cubic from box a to box b as its four points: side to side, its controls raised by `lift`, or top to bottom. */
+function curveOf(a, b, isSide, lift = 0) {
+  const acx = a.x + a.w / 2, acy = a.y + a.h / 2, bcx = b.x + b.w / 2, bcy = b.y + b.h / 2
+  if (isSide) {
+    const s = bcx > acx ? 1 : -1, x1 = s > 0 ? a.x + a.w : a.x, x2 = s > 0 ? b.x : b.x + b.w
+    const dx = s * Math.max(30, Math.abs(x2 - x1) / 2)
+    return [[x1, acy], [x1 + dx, acy - lift], [x2 - dx, bcy - lift], [x2, bcy]]
+  }
+  const s = bcy > acy ? 1 : -1, y1 = s > 0 ? a.y + a.h : a.y, y2 = s > 0 ? b.y : b.y + b.h
+  const dy = s * Math.max(24, Math.abs(y2 - y1) / 2)
+  return [[acx, y1], [acx, y1 + dy], [bcx, y2 - dy], [bcx, y2]]
 }
 
-let positions = new Map()
+const pathOf = c => `M${c[0].join(' ')} C${c[1].join(' ')} ${c[2].join(' ')} ${c[3].join(' ')}`
+const pointOn = (c, t) => [0, 1].map(k => (1 - t) ** 3 * c[0][k] + 3 * (1 - t) ** 2 * t * c[1][k] + 3 * (1 - t) * t ** 2 * c[2][k] + t ** 3 * c[3][k])
+/** A curve from box a to box b: side to side when they stand apart, else top to bottom. */
+const boxPath = (a, b) => pathOf(curveOf(a, b, isApart(a, b)))
+
+function hoverShows(node, ids, after = null) {
+  node.addEventListener('mouseenter', () => { if (gdrag?.moved) return; state.hovered = ids; drawGraphLinks() })
+  node.addEventListener('mouseleave', () => { if (gdrag?.moved) return; state.hovered = after; drawGraphLinks() })
+}
+
+function drawCard(r, p, now) {
+  const glyph = glyphOf(r)
+  const g = el('g', { class: `card${r.id === state.selected ? ' selected' : ''}`, transform: `translate(${p.x} ${p.y})`, tabindex: '0', role: 'button', 'aria-label': `${r.title}, ${r.state}` })
+  g.dataset.key = r.id
+  g.dataset.request = r.id
+  const extra = r.followUps.length ? ` +${r.followUps.length}` : ''
+  const quiet = ageText(now - r.updated)
+  const mark = r.state === 'closed' ? ['◆ closed', 'g-done', `closed ${timeText(r.closedAt)}`] : r.state === 'ready' ? ['ready', 'g-ready', STATE_WORDS.ready] : r.state === 'stale' ? [quiet, 'g-todo', `no event for ${quiet}`] : null
+  g.append(
+    el('rect', { class: 'card-box', width: CARD_W, height: CARD_H, rx: 8 }),
+    el('rect', { class: `g-${glyph}`, x: 0, y: 10, width: 3, height: CARD_H - 20, rx: 1.5 }),
+    el('text', { class: `glyph g-${glyph}`, x: 12, y: 25 }, GLYPHS[glyph]),
+    el('text', { class: 'card-title', x: 30, y: 25 }, clip(r.title, 25)),
+    el('text', { class: 'card-age', x: CARD_W - 12, y: 25, 'text-anchor': 'end' }, ageText(now - r.start)),
+    el('text', { class: 'rollup', x: 30, y: 49 }, r.total ? `${rollupBar(r.done, r.total)}${extra}` : extra.trim() || 'no pieces'),
+    el('title', {}, `${r.title} · opened ${timeText(r.start)}`),
+  )
+  if (mark) {
+    const text = el('text', { class: `after ${mark[1]}`, x: CARD_W - 12, y: 49, 'text-anchor': 'end' }, mark[0])
+    text.append(el('title', {}, mark[2]))
+    g.append(text)
+  }
+  hoverShows(g, [r.id])
+  return g
+}
+
+function drawChain(item, p) {
+  const ids = item.requests.map(r => r.id)
+  const g = el('g', { transform: `translate(${p.x} ${p.y})` })
+  g.dataset.key = item.key
+  g.dataset.request = item.row.request.id
+  // About 6 px a unit at the note's 11 px.
+  g.append(el('text', { class: 'note', x: 2, y: 12 }, clip(`${item.row.pattern.replace(/<ver>/g, '…')} · series of ${ids.length}`, Math.max(24, Math.floor(item.w / 6)))))
+  const top = CHAIN_H - CHIP_H, cy = top + CHIP_H / 2
+  item.requests.forEach((r, k) => {
+    const x = k * (CHIP_W + CHIP_GAP), glyph = glyphOf(r)
+    if (k > 0) g.append(el('line', { class: 'chain', x1: x - CHIP_GAP, x2: x, y1: cy, y2: cy }))
+    const chip = el('g', { class: `chip${r.id === state.selected ? ' selected' : ''}`, tabindex: '0', role: 'button', 'aria-label': `${r.title}, ${r.state}` })
+    chip.dataset.request = r.id
+    const text = el('text', { class: 'chip-text', x: x + CHIP_W / 2, y: cy + 4, 'text-anchor': 'middle' })
+    text.append(el('tspan', { class: `g-${glyph}` }, r.state === 'closed' ? '◆' : GLYPHS[glyph]), el('tspan', {}, ` ${clip(versionOf(r.title) || r.title, 8)}`))
+    chip.append(el('rect', { class: 'chip-box', x, y: top, width: CHIP_W, height: CHIP_H, rx: CHIP_H / 2 }), text, el('title', {}, `${r.title} · ${STATE_WORDS[r.state] ?? r.state}`))
+    hoverShows(chip, [r.id], ids)
+    g.append(chip)
+  })
+  hoverShows(g, ids)
+  return g
+}
+
+/** The graph: clusters behind each line's items, the line order under the links, the cards and chains; where it placed them kept for the links and the pointer. */
+function drawGraph(groups, now) {
+  const items = graphItems(groups), auto = defaultLayout(items, groups)
+  const at = new Map(items.map(i => [i.key, state.positions.get(i.key) ?? auto.get(i.key)]))
+  const boxes = new Map(), clusters = []
+  for (const i of items) {
+    const p = at.get(i.key)
+    if (i.kind === 'card') boxes.set(i.key, { x: p.x, y: p.y, w: CARD_W, h: CARD_H })
+    else i.requests.forEach((r, k) => boxes.set(r.id, { x: p.x + k * (CHIP_W + CHIP_GAP), y: p.y + CHAIN_H - CHIP_H, w: CHIP_W, h: CHIP_H }))
+  }
+  const cg = $('g-clusters'), ng = $('g-nodes')
+  cg.replaceChildren()
+  groups.forEach((group, gi) => {
+    const own = items.filter(i => i.group === gi).map(i => ({ ...at.get(i.key), w: i.w, h: i.h }))
+    if (!group.line || own.length === 0) return
+    const x = Math.min(...own.map(b => b.x)) - PAD, y = Math.min(...own.map(b => b.y)) - BAND_HEAD
+    const box = { x, y, w: Math.max(...own.map(b => b.x + b.w)) + PAD - x, h: Math.max(...own.map(b => b.y + b.h)) + PAD - y }
+    clusters.push(box)
+    const name = el('text', { class: 'group-name', x: x + 14, y: y + 22 }, clip(group.name.toUpperCase(), 40))
+    if (group.note) name.append(el('tspan', { class: 'note' }, `  ${group.note}`))
+    cg.append(el('rect', { class: 'cluster-box', x, y, width: box.w, height: box.h, rx: 12 }), name)
+  })
+  ng.replaceChildren(...items.map(i => (i.kind === 'card' ? drawCard(i.requests[0], at.get(i.key), now) : drawChain(i, at.get(i.key)))))
+  graphDrawn = { items, at, boxes, clusters, groups }
+  drawGraphLinks()
+  if (!state.graph && !gdrag) fitGraph()
+  else applyGraph()
+}
+
+/** Each line's items in start order joined by a thin line; the request links over them, those of the hovered request hot and the rest dimmed. */
+function drawGraphLinks() {
+  const lg = $('g-links'), og = $('g-order'), { items, at, boxes, groups } = graphDrawn
+  const hovered = new Set(state.hovered ?? [])
+  lg.replaceChildren(); og.replaceChildren()
+  lg.classList.toggle('hovering', hovered.size > 0)
+  og.classList.toggle('hovering', hovered.size > 0)
+  groups?.forEach((group, gi) => {
+    if (!group.line) return
+    const own = items.filter(i => i.group === gi).sort((a, b) => a.start - b.start).map(i => ({ ...at.get(i.key), w: i.w, h: i.h }))
+    for (let k = 1; k < own.length; k++) og.append(el('path', { class: 'order', d: boxPath(own[k - 1], own[k]) }))
+  })
+  const itemBoxes = items.map(i => ({ ...at.get(i.key), w: i.w, h: i.h }))
+  const inside = (box, [x, y]) => x >= box.x && x <= box.x + box.w && y >= box.y && y <= box.y + box.h
+  const center = p => [p.x + p.w / 2, p.y + p.h / 2]
+  /** The curve that crosses the fewest other items: straight across, top to bottom, or arced over or under what lies between. */
+  const routeOf = (a, b) => {
+    const others = itemBoxes.filter(box => !inside(box, center(a)) && !inside(box, center(b)))
+    const crossings = c => Array.from({ length: 19 }, (_, k) => pointOn(c, (k + 1) / 20)).filter(p => others.some(box => inside(box, p))).length
+    const tries = [curveOf(a, b, false)]
+    if (isApart(a, b)) {
+      const lo = Math.min(a.x + a.w, b.x + b.w), hi = Math.max(a.x, b.x), between = others.filter(box => box.x < hi && box.x + box.w > lo)
+      const top = Math.min(center(a)[1], center(b)[1]), bottom = Math.max(center(a)[1], center(b)[1])
+      tries.unshift(curveOf(a, b, true))
+      // A cubic's middle reaches three quarters of its controls' rise.
+      if (between.length) tries.push(curveOf(a, b, true, (top - Math.min(...between.map(box => box.y)) + 16) / 0.75), curveOf(a, b, true, -(Math.max(...between.map(box => box.y + box.h)) - bottom + 16) / 0.75))
+    }
+    return tries.map(c => ({ c, n: crossings(c) })).reduce((best, one) => (one.n < best.n ? one : best)).c
+  }
+  for (const link of requestLinks(new Set(boxes.keys()))) {
+    const kind = link.kind === 'builds' ? '' : ` ${link.kind}`, faded = link.kind === 'depends' && !link.confirmed ? ' proposed' : ''
+    const hot = hovered.has(link.from) || hovered.has(link.to) ? ' hot' : ''
+    lg.append(el('path', { class: `edge${kind}${faded}${hot}`, d: pathOf(routeOf(boxes.get(link.from), boxes.get(link.to))), 'marker-end': 'url(#g-arrow)' }))
+  }
+}
+
+const graphView = () => state.graph ?? { x: 40, y: 40, k: 1 }
+
+function applyGraph() {
+  const { x, y, k } = graphView()
+  $('world').setAttribute('transform', `translate(${x} ${y}) scale(${k})`)
+  $('dots').setAttribute('patternTransform', `translate(${x} ${y}) scale(${k})`)
+}
+
+/** Pan and zoom so every item and cluster shows, no larger than 1.2. */
+function fitGraph() {
+  const { items, at, clusters } = graphDrawn, stageBox = $('gstage').getBoundingClientRect()
+  if (items.length === 0 || stageBox.width === 0) { applyGraph(); return }
+  const all = [...items.map(i => ({ ...at.get(i.key), w: i.w, h: i.h })), ...clusters]
+  const minX = Math.min(...all.map(b => b.x)), minY = Math.min(...all.map(b => b.y))
+  const w = Math.max(...all.map(b => b.x + b.w)) - minX, h = Math.max(...all.map(b => b.y + b.h)) - minY
+  const k = Math.min(1.2, Math.max(MIN_K, Math.min((stageBox.width - 48) / w, (stageBox.height - 48) / h)))
+  state.graph = { k, x: (stageBox.width - w * k) / 2 - minX * k, y: Math.max(24, (stageBox.height - h * k) / 2) - minY * k }
+  applyGraph()
+  saveView()
+}
+
+function zoomGraph(factor, cx, cy) {
+  const v = graphView(), k = Math.min(MAX_K, Math.max(MIN_K, v.k * factor))
+  state.graph = { k, x: cx - (cx - v.x) * (k / v.k), y: cy - (cy - v.y) * (k / v.k) }
+  applyGraph()
+  saveView()
+}
+
+async function resetLayout() {
+  const keys = [...state.positions.keys()], project = state.project
+  state.positions = new Map()
+  render()
+  fitGraph()
+  if (state.db && project) await Promise.all(keys.map(key => state.db.doc(`projects/${project}/positions/${key}`).delete().catch(() => {})))
+}
 
 function render() {
-  positions = layout()
-  const shown = visibleNodes()
-  const ids = new Set(shown.map(n => n.id))
-  $('empty').hidden = state.nodes.size > 0
-  const edgesG = $('edges'), nodesG = $('nodes')
-  edgesG.replaceChildren(); nodesG.replaceChildren()
-
-  for (const e of state.edges) {
-    if (!ids.has(e.from) || !ids.has(e.to)) continue
-    // Edges run from the earlier node (the one built on or depended on) to the later one.
-    const path = el('path', {
-      d: edgePath(positions.get(e.to), positions.get(e.from)),
-      class: `edge${e.kind === 'depends_on' ? ' depends' : ''}${e.confirmed === false ? ' proposed' : ''}${state.selected && (e.from === state.selected || e.to === state.selected) ? ' hot' : ''}`,
-      'marker-end': 'url(#arrow)',
-    })
-    edgesG.append(path)
-  }
-
-  for (const n of shown) {
-    const p = positions.get(n.id)
-    const g = el('g', { class: `node${n.id === state.selected ? ' selected' : ''}`, transform: `translate(${p.x} ${p.y})`, tabindex: '0', role: 'button', 'aria-label': `${n.title}, ${n.status}` })
-    g.dataset.id = n.id
-    g.append(el('rect', { class: 'card', width: NODE_W, height: NODE_H, rx: 8 }))
-    g.append(el('rect', { x: 0, y: 8, width: 3, height: NODE_H - 16, rx: 1.5, fill: `var(--${n.status in { doing: 1, blocked: 1, todo: 1, done: 1 } ? n.status : 'todo'})` }))
-    g.append(el('text', { class: 'title', x: 14, y: 26 }, clip(n.title ?? n.id, 30)))
-    g.append(el('text', { class: 'meta', x: 14, y: 47 }, [STATUSES.find(s => s.key === n.status)?.label ?? n.status, n.kind, dateText(createdOf(n))].filter(Boolean).join(' · ')))
-    nodesG.append(g)
-  }
-  applyView()
-  renderFilters()
+  const now = Date.now(), isGraph = state.view.kind === 'graph'
+  const groups = groupsOf(state.board)
+  // The drawer first: it takes its width from the board before the board is measured.
   renderDetail()
-}
-
-function applyView() {
-  const { x, y, k } = state.view
-  $('world').setAttribute('transform', `translate(${x} ${y}) scale(${k})`)
-}
-
-function saveView() { if (state.project) store.set(`view:${state.project}`, state.view) }
-
-function zoomAt(factor, cx, cy) {
-  const v = state.view
-  const k = Math.min(2.5, Math.max(0.2, v.k * factor))
-  v.x = cx - (cx - v.x) * (k / v.k)
-  v.y = cy - (cy - v.y) * (k / v.k)
-  v.k = k
-  applyView(); saveView()
-}
-
-function fit() {
-  const shown = visibleNodes()
-  if (shown.length === 0) return
-  const xs = shown.map(n => positions.get(n.id).x), ys = shown.map(n => positions.get(n.id).y)
-  const minX = Math.min(...xs), minY = Math.min(...ys), maxX = Math.max(...xs) + NODE_W, maxY = Math.max(...ys) + NODE_H
-  const box = $('stage').getBoundingClientRect()
-  const k = Math.min(1.2, Math.max(0.2, Math.min((box.width - 64) / (maxX - minX), (box.height - 64) / (maxY - minY))))
-  state.view = { k, x: (box.width - (maxX - minX) * k) / 2 - minX * k, y: (box.height - (maxY - minY) * k) / 2 - minY * k }
-  applyView(); saveView()
-}
-
-function renderFilters() {
-  const box = $('filters')
-  box.replaceChildren()
-  for (const s of STATUSES) {
-    const count = [...state.nodes.values()].filter(n => n.status === s.key).length
-    const b = document.createElement('button')
-    b.className = 'chip'
-    b.setAttribute('aria-pressed', String(state.shown.has(s.key)))
-    b.innerHTML = `<span class="dot" style="background:var(--${s.key})"></span>`
-    b.append(s.label, Object.assign(document.createElement('span'), { className: 'count', textContent: count }))
-    b.onclick = () => { state.shown.has(s.key) ? state.shown.delete(s.key) : state.shown.add(s.key); render() }
-    box.append(b)
+  $('stage').hidden = isGraph
+  $('gstage').hidden = !isGraph
+  if (isGraph) {
+    drawGraph(groups, now)
+  } else {
+    const width = $('stage').clientWidth
+    const sc = scaleOf(width, now), cols = columnsOf(sc.start, sc.end, state.view.mode)
+    drawAxis(width, sc, cols, now)
+    drawRows(width, sc, cols, groups, now)
   }
+  drawAging(now)
+  renderControls(now)
+  renderEmpty(groups)
 }
 
-function linkButtons(ids) {
-  const box = document.createElement('div')
-  box.className = 'links'
-  for (const id of ids) {
-    const b = document.createElement('button')
-    b.textContent = state.nodes.get(id)?.title ?? id
-    b.onclick = () => select(id, true)
-    box.append(b)
-  }
-  return box
+function renderControls(now) {
+  const name = state.projects.find(p => p.id === state.project)?.name, isGraph = state.view.kind === 'graph'
+  $('heading').textContent = name ? `${name} · progress` : 'Progress'
+  $('now-label').textContent = `now ┊ ${new Date(now).toLocaleString(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })}`
+  $('view-timeline').setAttribute('aria-pressed', String(!isGraph))
+  $('view-graph').setAttribute('aria-pressed', String(isGraph))
+  $('modes').hidden = isGraph
+  $('mode-day').setAttribute('aria-pressed', String(state.view.mode === 'day'))
+  $('mode-week').setAttribute('aria-pressed', String(state.view.mode === 'week'))
+  $('show-open').setAttribute('aria-pressed', String(state.filter === 'open'))
+  $('show-all').setAttribute('aria-pressed', String(state.filter === 'all'))
+  $('to-now').textContent = isGraph ? 'Fit' : 'Now'
+  $('to-now').title = isGraph ? 'Show every card' : 'Show the last days up to now'
+  $('reset-layout').hidden = !isGraph
+  $('legend-timeline').hidden = isGraph
+  $('legend-graph').hidden = !isGraph
+}
+
+function renderEmpty(groups) {
+  const box = $('empty')
+  const hasRequests = state.board.requests.some(r => r.state !== 'dropped')
+  const message = state.isUnavailable
+    ? ['The board cannot load here', 'Open this page signed in to claude.ai to see the progress recorded by Claude.']
+    : groups.length > 0
+      ? null
+      : hasRequests
+        ? ['No open requests', 'Every request is closed. Choose all to see them on the time line.']
+        : ['No requests recorded yet', 'When Claude plans work or finishes a turn that changed something, the request appears here under its line.']
+  box.hidden = message === null
+  if (message) box.firstChild.replaceChildren(html('strong', { textContent: message[0] }), message[1])
+}
+
+function copyRow(text) {
+  const button = html('button', { textContent: 'Copy' })
+  button.onclick = () => navigator.clipboard?.writeText(text).then(() => { button.textContent = 'Copied'; setTimeout(() => { button.textContent = 'Copy' }, 1200) }, () => {})
+  return html('div', { className: 'copy' }, html('code', { textContent: text }), button)
+}
+
+function pieceList(pieces) {
+  return html('ul', { className: 'pieces' }, ...pieces.map(n => {
+    const s = GLYPHS[n.status] ? n.status : 'todo'
+    const meta = [timeText(n.at), n.commit, n.session && `session ${n.session}`].filter(Boolean).join(' · ')
+    return html('li', {}, html('span', { className: `mono c-${s}`, textContent: GLYPHS[s] }), html('span', { textContent: n.title }), html('span', { className: 'meta', textContent: meta }))
+  }))
 }
 
 function renderDetail() {
   const box = $('detail')
-  const n = state.selected && state.nodes.get(state.selected)
-  box.hidden = !n
-  if (!n) return
-  box.replaceChildren()
-  const h = document.createElement('h2'); h.textContent = n.title ?? n.id
-  const p = document.createElement('p'); p.textContent = n.summary ?? ''
-  const dl = document.createElement('dl')
-  const row = (k, v, mono) => {
-    if (v === undefined || v === null || v === '' || (Array.isArray(v) && v.length === 0)) return
-    const dt = document.createElement('dt'); dt.textContent = k
-    const dd = document.createElement('dd')
-    if (v instanceof Node) dd.append(v); else { dd.textContent = v; if (mono) dd.className = 'mono' }
-    dl.append(dt, dd)
-  }
-  const status = document.createElement('span')
-  status.innerHTML = `<span class="dot" style="display:inline-block;margin-right:6px;background:var(--${n.status})"></span>`
-  status.append(STATUSES.find(s => s.key === n.status)?.label ?? n.status)
-  row('Status', status)
-  row('Kind', n.kind)
-  row('Created', createdOf(n) ? new Date(createdOf(n)).toLocaleString() : '')
-  if (n.updated && n.updated !== createdOf(n)) row('Updated', new Date(n.updated).toLocaleString())
-  const out = kind => state.edges.filter(e => e.from === n.id && e.kind === kind).map(e => e.to)
-  const into = state.edges.filter(e => e.to === n.id).map(e => e.from)
-  if (out('builds_on').length) row('Builds on', linkButtons(out('builds_on')))
-  if (out('depends_on').length) row('Depends on', linkButtons(out('depends_on')))
-  if (into.length) row('Led to', linkButtons(into))
-  row('Commit', n.commit, true)
-  row('Node', n.id, true)
-  box.append(h, p, dl)
+  const r = state.selected ? state.board.byId.get(state.selected) : null
+  box.hidden = !r
+  if (!r) return
+  const dl = html('dl')
+  const row = (k, v) => { if (v === undefined || v === null || v === '') return; dl.append(html('dt', { textContent: k }), html('dd', {}, v)) }
+  const glyph = glyphOf(r)
+  row('State', html('span', {}, html('span', { className: `mono c-${glyph}`, textContent: `${GLYPHS[glyph]} ` }), STATE_WORDS[r.state] ?? r.state))
+  row('Opened', timeText(r.start))
+  if (r.closedAt) row('Closed', timeText(r.closedAt))
+  else row('Last event', `${timeText(r.updated)} · ${ageText(Date.now() - r.updated)} ago`)
+  if (r.resolution) row('Resolution', `by ${r.resolution.by}: ${r.resolution.evidence}`)
+  const line = state.board.lines.get(r.line)
+  row('Line', line ? html('span', {}, `${line.name || line.id}${line.definition ? ` — ${line.definition}` : ''} `, html('span', { className: 'mono', textContent: line.id })) : 'none')
+  if (r.session) row('Session', html('span', { className: 'mono', textContent: r.session }))
+  const parts = [html('h2', { textContent: r.title }), dl]
+  const acceptance = Array.isArray(r.acceptance) ? r.acceptance : []
+  if (acceptance.length) parts.push(html('h3', { textContent: 'Acceptance' }), html('ul', {}, ...acceptance.map(a => html('li', { textContent: a }))))
+  const counted = r.counted
+  parts.push(html('h3', { textContent: `Pieces ${r.done}/${r.total}` }), counted.length ? pieceList(counted) : html('p', { className: 'hint', textContent: 'No pieces yet.' }))
+  if (r.followUps.length) parts.push(html('h3', { textContent: 'Follow-ups' }), pieceList(r.followUps))
+  parts.push(
+    html('h3', { textContent: 'Request id' }), copyRow(r.id),
+    html('h3', { textContent: 'Move to another line' }), copyRow(`/progress-line ${r.id} <line id>`),
+    html('p', { className: 'hint', textContent: 'The canvas only reads the board: run this in Claude Code with the line id, or new <name> for a new line.' }),
+  )
+  box.replaceChildren(...parts)
 }
 
-function select(id, center) {
+function select(id) {
   state.selected = id
   render()
-  if (center && id && positions.has(id)) {
-    const p = positions.get(id), box = $('stage').getBoundingClientRect(), k = state.view.k
-    state.view.x = box.width / 2 - (p.x + NODE_W / 2) * k
-    state.view.y = box.height / 2 - (p.y + NODE_H / 2) * k
-    applyView(); saveView()
-  }
 }
 
-// Pointer: a node drags itself and saves its spot once on release; the canvas pans.
-let drag = null
-$('stage').addEventListener('pointerdown', ev => {
-  const g = ev.target.closest('.node')
-  const p = g && positions.get(g.dataset.id)
-  drag = g ? { id: g.dataset.id, sx: ev.clientX, sy: ev.clientY, ox: p.x, oy: p.y, moved: false } : { pan: true, sx: ev.clientX, sy: ev.clientY, ox: state.view.x, oy: state.view.y, moved: false }
-  $('stage').setPointerCapture(ev.pointerId)
-  if (drag.pan) $('stage').classList.add('panning')
-})
-$('stage').addEventListener('pointermove', ev => {
-  if (!drag) return
-  const dx = ev.clientX - drag.sx, dy = ev.clientY - drag.sy
-  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true
-  if (!drag.moved) return
-  if (drag.pan) { state.view.x = drag.ox + dx; state.view.y = drag.oy + dy; applyView(); return }
-  state.positions.set(drag.id, { x: drag.ox + dx / state.view.k, y: drag.oy + dy / state.view.k })
+function saveView() { if (state.project) store.set(`timeview:${state.project}`, { ...state.view, filter: state.filter, graph: state.graph }) }
+
+function setView(view) {
+  state.view = { ...state.view, ...view, span: Math.min(MAX_SPAN, Math.max(MIN_SPAN, view.span ?? state.view.span)) }
+  saveView()
   render()
+}
+
+function zoomAt(factor, px) {
+  const sc = drawn.sc ?? scaleOf($('stage').clientWidth, Date.now())
+  const anchor = sc.t(px), span = Math.min(MAX_SPAN, Math.max(MIN_SPAN, state.view.span * factor))
+  setView({ span, end: anchor + (sc.end - anchor) * (span / state.view.span) })
+}
+
+function panBy(px) {
+  const sc = drawn.sc ?? scaleOf($('stage').clientWidth, Date.now())
+  setView({ end: sc.end + (px / sc.w) * state.view.span })
+}
+
+// Pointer: a drag on the stage pans the time axis; a click selects the row under it, or nothing.
+let drag = null
+const stage = $('stage')
+stage.addEventListener('pointerdown', ev => {
+  if (ev.button !== 0 || !drawn.sc) return
+  drag = { id: ev.pointerId, sx: ev.clientX, end: drawn.sc.end, moved: false }
 })
-$('stage').addEventListener('pointerup', async () => {
+stage.addEventListener('pointermove', ev => {
+  if (!drag) return
+  const dx = ev.clientX - drag.sx
+  if (!drag.moved && Math.abs(dx) > 3) { drag.moved = true; stage.setPointerCapture(drag.id); stage.classList.add('panning') }
+  if (drag.moved) { state.view.end = drag.end - (dx / drawn.sc.w) * state.view.span; render() }
+})
+stage.addEventListener('pointerup', ev => {
   const was = drag
   drag = null
-  $('stage').classList.remove('panning')
+  stage.classList.remove('panning')
   if (!was) return
-  if (was.pan) { if (was.moved) saveView(); else select(null); return }
-  if (!was.moved) { select(was.id); return }
-  const p = state.positions.get(was.id)
-  if (state.db && state.project) {
-    await state.db.doc(`projects/${state.project}/positions/${was.id}`).set({ x: Math.round(p.x), y: Math.round(p.y) }).catch(() => {})
-  }
+  if (was.moved) { saveView(); return }
+  select(ev.target.closest?.('[data-request]')?.dataset.request ?? null)
 })
-$('stage').addEventListener('keydown', ev => {
-  const g = ev.target.closest?.('.node')
-  if (g && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); select(g.dataset.id) }
-})
-$('stage').addEventListener('wheel', ev => {
-  ev.preventDefault()
-  const box = $('stage').getBoundingClientRect()
-  zoomAt(Math.exp(-ev.deltaY * 0.0015), ev.clientX - box.left, ev.clientY - box.top)
+stage.addEventListener('pointercancel', () => { drag = null; stage.classList.remove('panning') })
+stage.addEventListener('wheel', ev => {
+  const box = stage.getBoundingClientRect()
+  if (ev.ctrlKey || ev.metaKey) { ev.preventDefault(); zoomAt(Math.exp(ev.deltaY * 0.002), ev.clientX - box.left) }
+  else if (ev.shiftKey || Math.abs(ev.deltaX) > Math.abs(ev.deltaY)) { ev.preventDefault(); panBy(ev.deltaX || ev.deltaY) }
 }, { passive: false })
-const centerZoom = f => { const b = $('stage').getBoundingClientRect(); zoomAt(f, b.width / 2, b.height / 2) }
-$('zoom-in').onclick = () => centerZoom(1.2)
-$('zoom-out').onclick = () => centerZoom(1 / 1.2)
-$('fit').onclick = fit
-$('relayout').onclick = async () => {
-  const ids = [...state.positions.keys()]
-  state.positions = new Map()
-  render(); fit()
-  if (state.db && state.project) for (const id of ids) await state.db.doc(`projects/${state.project}/positions/${id}`).delete().catch(() => {})
-}
+$('aging').addEventListener('click', ev => { const id = ev.target.closest?.('[data-request]')?.dataset.request; if (id) select(id) })
+$('aging').addEventListener('keydown', ev => { const id = ev.target.closest?.('[data-request]')?.dataset.request; if (id && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); select(id) } })
+
+// Pointer on the graph: a card or a series drags itself and saves its spot on release; the background pans; a click selects the
+// card or chip under it, or nothing.
+let gdrag = null
+const gstage = $('gstage')
+gstage.addEventListener('pointerdown', ev => {
+  if (ev.button !== 0) return
+  const item = ev.target.closest?.('[data-key]'), p = item && graphDrawn.at.get(item.dataset.key), v = graphView()
+  gdrag = p
+    ? { id: ev.pointerId, key: item.dataset.key, pick: ev.target.closest('[data-request]')?.dataset.request ?? null, sx: ev.clientX, sy: ev.clientY, ox: p.x, oy: p.y, moved: false }
+    : { id: ev.pointerId, pan: true, sx: ev.clientX, sy: ev.clientY, ox: v.x, oy: v.y, moved: false }
+})
+gstage.addEventListener('pointermove', ev => {
+  if (!gdrag) return
+  const dx = ev.clientX - gdrag.sx, dy = ev.clientY - gdrag.sy
+  if (!gdrag.moved && Math.abs(dx) + Math.abs(dy) > 3) { gdrag.moved = true; gstage.setPointerCapture(gdrag.id); gstage.classList.add('panning'); state.hovered = null }
+  if (!gdrag.moved) return
+  if (gdrag.pan) { state.graph = { ...graphView(), x: gdrag.ox + dx, y: gdrag.oy + dy }; applyGraph(); return }
+  const { k } = graphView()
+  state.positions.set(gdrag.key, { x: gdrag.ox + dx / k, y: gdrag.oy + dy / k })
+  drawGraph(groupsOf(state.board), Date.now())
+})
+gstage.addEventListener('pointerup', () => {
+  const was = gdrag
+  gdrag = null
+  gstage.classList.remove('panning')
+  if (!was) return
+  if (!was.moved) { select(was.pan ? null : was.pick); return }
+  if (was.pan) { saveView(); return }
+  const p = state.positions.get(was.key)
+  if (state.db && state.project) state.db.doc(`projects/${state.project}/positions/${was.key}`).set({ x: Math.round(p.x), y: Math.round(p.y) }).catch(() => {})
+})
+gstage.addEventListener('pointercancel', () => { gdrag = null; gstage.classList.remove('panning') })
+gstage.addEventListener('wheel', ev => {
+  ev.preventDefault()
+  const box = gstage.getBoundingClientRect()
+  if (ev.ctrlKey || ev.metaKey) { zoomGraph(Math.exp(-ev.deltaY * 0.002), ev.clientX - box.left, ev.clientY - box.top); return }
+  const v = graphView()
+  state.graph = { ...v, x: v.x - ev.deltaX, y: v.y - ev.deltaY }
+  applyGraph()
+  saveView()
+}, { passive: false })
+gstage.addEventListener('keydown', ev => { const id = ev.target.closest?.('[data-request]')?.dataset.request; if (id && (ev.key === 'Enter' || ev.key === ' ')) { ev.preventDefault(); select(id) } })
+
+document.addEventListener('keydown', ev => { if (ev.key === 'Escape' && state.selected) select(null) })
+const middle = () => LABEL_W + (stage.clientWidth - LABEL_W) / 2
+const zoomGraphMiddle = factor => { const box = gstage.getBoundingClientRect(); zoomGraph(factor, box.width / 2, box.height / 2) }
+$('zoom-in').onclick = () => (state.view.kind === 'graph' ? zoomGraphMiddle(1.25) : zoomAt(1 / 1.4, middle()))
+$('zoom-out').onclick = () => (state.view.kind === 'graph' ? zoomGraphMiddle(1 / 1.25) : zoomAt(1.4, middle()))
+$('to-now').onclick = () => (state.view.kind === 'graph' ? fitGraph() : setView({ span: SPANS[state.view.mode], end: null }))
+$('reset-layout').onclick = () => resetLayout()
+$('view-timeline').onclick = () => setView({ kind: 'timeline' })
+$('view-graph').onclick = () => setView({ kind: 'graph' })
+$('mode-day').onclick = () => setView({ mode: 'day', span: SPANS.day, end: null })
+$('mode-week').onclick = () => setView({ mode: 'week', span: SPANS.week, end: null })
+// The graph fits again: other requests move the default layout.
+$('show-open').onclick = () => { state.filter = 'open'; if (state.view.kind === 'graph') state.graph = null; saveView(); render() }
+$('show-all').onclick = () => { state.filter = 'all'; if (state.view.kind === 'graph') state.graph = null; saveView(); render() }
+window.addEventListener('resize', () => render())
+// The now line moves with the clock.
+setInterval(() => render(), 60 * 1000)
 
 function openProject(id) {
   state.unsubs.forEach(u => u()); state.unsubs = []
-  state.project = id; state.nodes = new Map(); state.edges = []; state.positions = new Map(); state.selected = null
+  state.project = id; state.docs = []; state.board = fold([]); state.selected = null; state.hovered = null; state.positions = new Map()
   store.set('project', id)
   $('project').value = id ?? ''
-  const saved = store.get(`view:${id}`)
-  let fitted = !!saved
-  if (saved) state.view = saved
+  const saved = id && store.get(`timeview:${id}`)
+  const mode = saved?.mode === 'week' ? 'week' : 'day'
+  state.view = { mode, span: typeof saved?.span === 'number' ? saved.span : SPANS[mode], end: typeof saved?.end === 'number' ? saved.end : null, kind: saved?.kind === 'graph' ? 'graph' : 'timeline' }
+  state.filter = saved?.filter === 'all' ? 'all' : 'open'
+  state.graph = isRecord(saved?.graph) && ['x', 'y', 'k'].every(k => Number.isFinite(saved.graph[k])) ? saved.graph : null
   render()
   if (!id) return
-  const base = `projects/${id}`
-  const onErr = () => {}
-  state.unsubs.push(state.db.collection(`${base}/events`).onSnapshot(snap => {
-    fold(snap.docs.map(d => d.data()))
+  state.unsubs.push(state.db.collection(`projects/${id}/events`).onSnapshot(snap => {
+    state.docs = snap.docs.map(d => ({ ...d.data(), _doc: d.id }))
+    state.board = fold(state.docs)
     render()
-    if (!fitted && state.nodes.size) { fitted = true; fit() }
-  }, onErr))
-  state.unsubs.push(state.db.collection(`${base}/positions`).onSnapshot(snap => {
-    if (drag && !drag.pan) return
-    state.positions = new Map(snap.docs.map(d => [d.id, d.data()]))
+  }, () => {}))
+  state.unsubs.push(state.db.collection(`projects/${id}/positions`).onSnapshot(snap => {
+    if (gdrag && !gdrag.pan) return
+    state.positions = new Map(snap.docs.map(d => [d.id, d.data()]).filter(([, p]) => Number.isFinite(p?.x) && Number.isFinite(p?.y)))
     render()
-  }, onErr))
-}
-
-// The board is append-only events, oldest first, each with its node's full fields after it: the first seen makes the node, whatever
-// its type (an earlier one may never have been mirrored), and the latest by time wins.
-function fold(events) {
-  const nodes = new Map()
-  for (const e of [...events].sort((a, b) => (a.at ?? 0) - (b.at ?? 0))) {
-    if (typeof e.node !== 'string') continue
-    const was = nodes.get(e.node)
-    if (!was) nodes.set(e.node, { id: e.node, created: e.at, updated: e.at, commit: e.commit ?? null, ...e.fields })
-    else nodes.set(e.node, { ...was, ...e.fields, updated: e.at, commit: e.commit ?? was.commit })
-  }
-  const edges = []
-  for (const n of nodes.values()) {
-    for (const to of Array.isArray(n.builds_on) ? n.builds_on : []) edges.push({ from: n.id, to, kind: 'builds_on' })
-    for (const d of Array.isArray(n.depends_on) ? n.depends_on : []) if (d && typeof d.id === 'string') edges.push({ from: n.id, to: d.id, kind: 'depends_on', confirmed: d.confirmed === true })
-  }
-  state.nodes = nodes
-  state.edges = edges
+  }, () => {}))
 }
 
 function renderProjects() {
   const sel = $('project')
   sel.replaceChildren()
-  for (const p of state.projects) {
-    const o = document.createElement('option')
-    o.value = p.id; o.textContent = p.name ?? p.id
-    sel.append(o)
-  }
+  for (const p of state.projects) sel.append(html('option', { value: p.id, textContent: p.name ?? p.id }))
   sel.hidden = state.projects.length === 0
   if (state.project) sel.value = state.project
 }
@@ -438,7 +1124,8 @@ $('project').onchange = ev => openProject(ev.target.value)
   render()
   const db = await claude.use('db')
   if (!db) {
-    $('empty').querySelector('div').innerHTML = '<strong>The board cannot load here</strong>Open this page signed in to claude.ai to see the progress recorded by Claude.'
+    state.isUnavailable = true
+    render()
     return
   }
   state.db = db
@@ -455,6 +1142,7 @@ $('project').onchange = ev => openProject(ev.target.value)
     const want = state.projects.some(p => p.id === state.project) ? state.project : state.projects.some(p => p.id === remembered) ? remembered : state.projects[0]?.id ?? null
     renderProjects()
     if (want !== state.project) openProject(want)
+    else render()
   }, () => {})
 })()
 </script>

@@ -38,7 +38,7 @@ Counterparts: use a code review to find problems; an architecture replacement is
 4. **Intentional security is KEEP** (authz, CSP, path safety, trust, lease). Only catch/`??`/fail-open with no requirement behind it gets deleted.
 5. **Dynamic entry points are KEEP** (reflection, selector, delegate, route strings, serialization key names, FFI exports).
 6. **Ask first in forbidden zones**: build project files, entitlements/manifest permissions, secrets, conditional-compilation variants changed only halfway.
-7. **One comment per line of code, long essays on special cases, comments that restate the code** → delete or compress to ≤2 lines of why. A 1–2 line responsibility note at the top may stay.
+7. **One comment per line of code, long essays on special cases, comments that restate the code** → delete or compress to ≤2 lines stating a functional constraint the code does not show. A 1–2 line responsibility note at the top may stay.
 8. **Don't change the same file in parallel.** Multiple agents must have mutually exclusive files.
 
 ## 2. Local smells: nine classes to cut (by ROI)
@@ -160,8 +160,8 @@ Partition files so they are mutually exclusive. The main process merges the list
 This skill is **decision and execution discipline**; it does not replace static analysis:
 
 - JS/TS: knip + unused scans that include tests
-- Python: sloppylint (AST lint for AI patterns; slop score can be a CI gate), AI-SLOP-Detector (fake-done detection)
+- Python: sloppylint (last updated 2025-12-30; AST lint for AI patterns; slop score can be a CI gate), AI-SLOP-Detector (fake-done detection)
 - General rule lists: aislop (`thin-wrapper`/`swallowed-exception`/`hidden-fallback`), slopbuster (79 code slop patterns)
-- Dead code: Periphery / knip / compiler unused — **must include test targets** (`exclude_tests:true` produces false deaths)
+- Dead code: Periphery (archived, now a commercial product) / knip / compiler unused — **must include test targets** (`exclude_tests:true` produces false deaths)
 
 When a tool reports "dead", it still has to pass the three gates of §E1 before deletion.

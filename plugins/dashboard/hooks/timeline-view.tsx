@@ -621,7 +621,7 @@ export function drawTimelineDesktop(
   const tier = widthTierOf(columns)
   const { height } = LANE[tier]
   // The wide tier starts at 760 px, narrower than the label column, its 16 px gap and a 572 px lane.
-  const px = tier === 'wide' ? Math.min(LANE.wide.width, columns * PIXELS_PER_COLUMN - LABEL_PX - 16) : LANE[tier].width
+  const px = tier === 'wide' ? Math.min(LANE.wide.width, Math.floor(columns * PIXELS_PER_COLUMN) - LABEL_PX - 16) : LANE[tier].width
   const perPage = STEPS_PER_PAGE[tier]
   const stepAt = view.rows.flatMap((row, i) => (row.kind === 'step' ? [i] : []))
   const pages = Math.ceil(stepAt.length / perPage)

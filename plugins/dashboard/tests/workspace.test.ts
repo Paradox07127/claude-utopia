@@ -4,6 +4,7 @@ import type { On, RenderInput, SessionStartInput } from 'claude-code'
 
 import { setLang } from '../hooks/i18n'
 import { parseAheadBehind, parseWorktrees, treeMarks, treeOf } from '../hooks/workspace'
+import { withClocks } from './clocks'
 
 const ZH = { options: { language: 'zh-CN' } }
 
@@ -145,8 +146,9 @@ const listed = (runs: string[]) => runs.filter(argv => argv.endsWith('worktree l
 function linesOf(node: unknown): string[] {
   const tree = node as { type?: string; children?: unknown[] }
 
-  if (tree.type === 'Text') {
-    return [textOf(tree)]
+  // A line with a clock is a row of Texts around it.
+  if (tree.type === 'Text' || (tree.children ?? []).some(child => (child as { type?: string } | null)?.type === 'Client')) {
+    return [textOf(withClocks(tree))]
   }
 
   return (tree.children ?? []).flatMap(child => (typeof child === 'object' && child !== null ? linesOf(child) : []))
@@ -396,7 +398,7 @@ describe('recent blocks', () => {
       expect(lines.slice(lines.indexOf(head) + 1, lines.indexOf(head) + 6), surface).toEqual(five)
       expect(lines.join('\n'), `${surface}: the unchecked line`).not.toContain('6m40s前')
       expect(lines.join('\n'), surface).not.toContain('未检查')
-      expect((await ui.find({ type: 'Text', text: 'git reset --hard · r · 主线程 · 5m00s前' }))?.props.color, surface).toBe('inactive')
+      expect((await ui.find({ type: 'Text', text: surface === 'terminal' ? 'git reset --hard · r · 主线程 · 5m00s前' : 'git reset --hard · r · 主线程 · ' }))?.props.color, surface).toBe('inactive')
       await ui.unmount()
     }
 

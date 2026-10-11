@@ -63,7 +63,7 @@ Used with `../SKILL.md` and `criteria.md`. The nine general classes still apply;
 
 ## 9. Tools
 
-- **Periphery**: must be able to see the test targets (`exclude_tests:true` falsely reports production symbols used only by tests as dead)
+- **Periphery** (archived, now a commercial product): must be able to see the test targets (`exclude_tests:true` falsely reports production symbols used only by tests as dead)
 - Compiler unused warnings, and the redundant `#available` warning above
 - API hallucinations (nonexistent APIs that don't compile) are caught by the compiler; this skill doesn't need to handle them
 

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""PreToolUse(Bash|Read): denies reading mmrun's *.raw; moves a foreground `mmrun wait` to the background."""
+"""PreToolUse(Bash|Read): denies reading mmrun's *.raw and a main-thread `mmrun wait` on a run the mm plugin watches;
+moves any other foreground `mmrun wait` to the background."""
 import json
 import os
 import re
@@ -8,11 +9,13 @@ import sys
 import time
 
 RAW_DENY = ("mm: *.raw is the full event stream (tens of thousands of tokens); do not read it. "
-            "Use `mmrun status <RUNID>` for status and `mmrun result <model> <RUNID>` for findings.")
+            "Use `mmrun status <RUNID>` for status and `mmrun result <model> <RUNID>` for findings. "
+            "For troubleshooting, the only allowed form is `tail -n N <file>.raw` with N at most 50, optionally `| cut -c1-M` with M at most 1000.")
+WAIT_DENY = "mm: the mm plugin watches {} and sends its result when it ends; do not wait for it."
 
 RAW_PATH = re.compile(r"/\.claude/mmruns/[^/]+/[^/]+\.raw$")
-# The whole command is one `tail -N|-n N <file>.raw`: the troubleshooting step the mm docs recommend.
-BOUNDED_TAIL = re.compile(r"\s*tail\s+(?:-(\d+)|-n\s+(\d+))\s+[^\s;&|<>()$`'\"\\*?]+\.raw\s*")
+# The whole command is one `tail -N|-n N <file>.raw`, optionally piped to `cut -c1-M`: the troubleshooting step the mm docs recommend.
+BOUNDED_TAIL = re.compile(r"\s*tail\s+(?:-(\d+)|-n\s+(\d+))\s+[^\s;&|<>()$`'\"\\*?]+\.raw\s*(?:\|\s*cut\s+-c1-(\d+)\s*)?")
 ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
 HOME_VAR = re.compile(r"\$(?:HOME\b|\{HOME\})")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1([^\n]*)\n.*?\n\s*\2\s*(?=\n|$)", re.S)
@@ -94,8 +97,41 @@ def names_raw(command, cwd):
     return False
 
 
-def deny():
-    entry = {"at": int(time.time() * 1000), "guard": "mm-raw", "decision": "deny", "op": "read *.raw",
+def session_key():
+    """mmrun's session_key(); None where mmrun falls back to its own parent pid, which the guard cannot know."""
+    k = os.environ.get("MMRUN_SESSION") or os.environ.get("CLAUDE_CODE_HOST_SESSION_ID")
+    return re.sub(rb"[^A-Za-z0-9_.-]", b"_", k.encode())[:64].decode("ascii") if k else None
+
+
+def watched_run(waits, session):
+    """The first waited run whose `watched` mark the mm plugin wrote in this session (a bare `watched`: any session);
+    RUNID parsed as mmrun's cmd_wait does."""
+    root = os.path.expanduser("~/.claude/mmruns")
+    for run in waits:
+        words = run[2:]
+        # A redirection ends mmrun's own words: `2>&1` reaches here as `2>`, `> f` as `>` and `f`.
+        words = words[:next((i for i, w in enumerate(words) if "<" in w or ">" in w), len(words))]
+        rid = ""
+        while words:
+            rid, words = (rid, words[2:]) if words[0] == "--timeout" else (words[0], words[1:])
+        try:
+            if not rid:
+                key = session_key()
+                if key is None:
+                    continue
+                with open(f"{root}/.latest-{key}") as f:
+                    rid = f.read().strip()
+            with open(f"{root}/{rid}/watched") as f:
+                mark = f.read().split()
+            if mark[:1] == ["watched"] and (len(mark) == 1 or mark[1] == session):
+                return rid
+        except OSError:
+            pass
+    return None
+
+
+def deny(guard="mm-raw", op="read *.raw", message=RAW_DENY):
+    entry = {"at": int(time.time() * 1000), "guard": guard, "decision": "deny", "op": op,
              "cwd": event.get("cwd"), "agent_id": event.get("agent_id")}
     path = os.path.expanduser("~/.claude/harness/guard.jsonl")
     try:  # a log that cannot be written is skipped
@@ -104,7 +140,7 @@ def deny():
             f.write(json.dumps(entry) + "\n")
     except OSError:
         pass
-    print(RAW_DENY, file=sys.stderr)
+    print(message, file=sys.stderr)
     sys.exit(2)
 
 
@@ -128,11 +164,15 @@ text = drop_heredocs(command)
 if any("mmruns" in w and re.search(r"\.raw\b", w) and (not re.search(r"\s", w) or "$(" in w or "`" in w)
        for words in commands(text) for w in words) or names_raw(text, event.get("cwd")):
     tail = BOUNDED_TAIL.fullmatch(command)
-    if not tail or int(tail.group(1) or tail.group(2)) > 50:
+    if not tail or int(tail.group(1) or tail.group(2)) > 50 or int(tail.group(3) or 0) > 1000:
         deny()
-if not any(len(run) > 1 and os.path.basename(run[0]) == "mmrun" and run[1] == "wait"
-           for run in map(executable, commands(text))):
+waits = [run for run in map(executable, commands(text)) if len(run) > 1 and os.path.basename(run[0]) == "mmrun" and run[1] == "wait"]
+if not waits:
     sys.exit(0)
+if event.get("agent_id") is None:
+    rid = watched_run(waits, event.get("session_id"))
+    if rid:
+        deny("mm-wait", "mmrun wait", WAIT_DENY.format(rid))
 
 new = {**ti, "run_in_background": True}
 # Background Bash is stopped at its `timeout` (default 30 min, max 2 h): cover mmrun's own --timeout plus a minute.

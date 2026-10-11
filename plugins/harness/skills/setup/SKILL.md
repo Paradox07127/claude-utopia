@@ -1,11 +1,11 @@
 ---
 name: setup
-description: Use when the user wants to review or change the claude-utopia plugin settings (UI language, blocked subagent models, shared-worktree git guard, idle auto-compact, mm review models, GPU hosts, dashboard toasts and chime) or finish an install. 配置 / 设置 / 改偏好.
+description: Use when the user wants to review or change the claude-utopia plugin settings (UI language, blocked subagent models, shared-worktree git guard, idle auto-compact, mm review models, GPU hosts, cache TTL, dashboard toasts and chime). 配置 / 设置 / 改偏好.
 ---
 
 # setup — review and change claude-utopia settings
 
-Reply in the user's language. Do not edit `~/.claude/settings.json` by hand; use the `claude plugin` commands below. If a command is refused by the permission system, show the user the exact command and ask them to run it.
+Reply in the user's language. Use the `claude plugin` commands below. If a command is refused by the permission system, show the user the exact command and ask them to run it.
 
 ## 1. Find what is installed
 
@@ -13,7 +13,7 @@ Reply in the user's language. Do not edit `~/.claude/settings.json` by hand; use
 claude plugin list
 ```
 
-Note which of `dashboard`, `harness`, `mm` are installed and their full ids (`<plugin>@<marketplace>`, normally `@claude-utopia`). For each one, read the current values:
+Note which of `dashboard`, `harness`, `mm` are installed and their full ids (`<plugin>@<marketplace>`; use the id whose status in `claude plugin list` is loaded or enabled). For each one, read the current values:
 
 ```bash
 claude plugin configure <plugin>@<marketplace> --json
@@ -50,7 +50,7 @@ for t in codex grok agy; do printf '%-6s %s\n' "$t" "$(command -v "$t" || echo m
 Pass only the changed keys, as a JSON object whose values are all strings:
 
 ```bash
-echo '{"language":"en","sharedTreeGitGuard":"false"}' | claude plugin configure harness@claude-utopia --values-stdin
+echo '{"language":"en","sharedTreeGitGuard":"false"}' | claude plugin configure harness@<marketplace> --values-stdin
 ```
 
 ## 4. Verify

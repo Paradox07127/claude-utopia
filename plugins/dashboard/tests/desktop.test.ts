@@ -4,11 +4,12 @@ import type { FsEntry, On, RenderInput, SessionStartInput } from 'claude-code'
 
 import { widthOf } from '../hooks/agent-model'
 import { commandHead } from '../hooks/board'
-import { drawDesktopPane } from '../hooks/desktop'
+import { drawDesktopPane, modelTone, textCells } from '../hooks/desktop'
 import type { PaneData } from '../hooks/desktop'
 import { setLang } from '../hooks/i18n'
 import { reportOf, reviewOf } from '../hooks/runs'
 import type { AgentRun, DashTimelinePage, GateRun, MmSnapshot, TimelineTurn, WorktreeInfo } from '../types'
+import { withClocks } from './clocks'
 
 const PLUGIN = 'dashboard'
 const SESSION: SessionStartInput = { surface: 'terminal', isInteractive: true, cwd: '/work' }
@@ -157,6 +158,41 @@ async function busy($: Engine, on: On) {
   return clock
 }
 
+describe('the desktop pane reads only what its page draws', () => {
+  test('用量 reads no tick, agent or timeline, so the 1 s ticker and new steps do not redraw it; 总览 reads its data but no tick', { options: { language: 'zh-CN' } }, async ($, on) => {
+    let reads: string[] | null = null
+
+    on('state.get', ($, e, next) => {
+      reads?.push(e.key)
+
+      return next(e)
+    })
+    await busy($, on)
+
+    const pane = await $.ui.mount({ plugin: PLUGIN, ...PANE, surface: 'desktop' } as never)
+    const readsOn = async (key: string) => {
+      await pane.press({ key })
+      reads = []
+      await pane.redraw()
+      const keys = reads as string[]
+
+      reads = null
+
+      return keys
+    }
+
+    const usage = await readsOn('page-usage')
+    const overview = await readsOn('page-overview')
+
+    expect(usage).toContain('ledger')
+    expect(usage.filter(key => ['tick', 'agents', 'timeline', 'gates', 'runs', 'gpu'].includes(key))).toEqual([])
+    expect(overview).toEqual(expect.arrayContaining(['agents', 'timeline', 'gates', 'runs']))
+    expect(overview).not.toContain('ledger')
+    expect(overview, 'its times move by themselves').not.toContain('tick')
+    await pane.unmount()
+  })
+})
+
 describe('the desktop draws cards and charts', () => {
   test('Agents: an elapsed bar per agent', { options: { language: 'zh-CN' } }, async ($, on) => {
     await busy($, on)
@@ -218,19 +254,23 @@ describe('the desktop draws cards and charts', () => {
     await pane.unmount()
   })
 
-  test('总览: a running row is its title beside its Button, then tools plus time; a quiet agent gets a 静默 chip', { options: { language: 'zh-CN' } }, async ($, on) => {
+  test('总览: a running row is its title beside its Button, then tools plus a time that moves by itself; a quiet agent gets a 静默 chip when it turns quiet', { options: { language: 'zh-CN' } }, async ($, on) => {
     const clock = await busy($, on)
-    const pane = await $.ui.mount({ plugin: PLUGIN, ...PANE, surface: 'desktop' } as never)
+    const pane = (await $.ui.mount({ plugin: PLUGIN, ...PANE, surface: 'desktop' } as never)) as Mounted<'desktop'>
 
     await pane.press({ key: 'page-overview' })
 
     const rows = (await pane.findAll({ type: 'Box' })).filter(box => box.props.minWidth === 0 && box.props.flexGrow === 1)
 
     expect(rows.length).toBeGreaterThanOrEqual(2)
-    expect(await pane.find({ type: 'Text', text: '0 tools · 0s' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '0 tools · ' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '0s', in: 'elapsed-a1' })).toBeDefined()
+    await pane.advance(3_000)
+    expect(await pane.find({ type: 'Text', text: '3s', in: 'elapsed-a1' }), 'the time moves without a redraw').toBeDefined()
 
     await clock.advance(120_000)
-    expect(await pane.find({ type: 'Text', text: '◐ 静默 2m00s' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: ' ◐ 静默 ' }), 'the overview is drawn again the moment the agent turns quiet').toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '2m00s', in: 'quiet-a1' })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: '需要你  ' }), 'quiet is no failure').toBeUndefined()
     await pane.unmount()
   })
@@ -269,7 +309,8 @@ describe('the desktop draws cards and charts', () => {
 
     await pane.press({ key: 'page-overview' })
     expect((await pane.find({ type: 'Text', text: '没有需要你处理或运行中的任务' }))?.props).toMatchObject({ color: 'subtle' })
-    expect((await pane.find({ type: 'Text', text: '✓ worker · Build mm plugin · 1m00s 前' }))?.props).toMatchObject({ color: 'subtle' })
+    expect((await pane.find({ type: 'Text', text: '✓ worker · Build mm plugin · ' }))?.props).toMatchObject({ color: 'subtle' })
+    expect((await pane.find({ type: 'Text', text: '1m00s', in: 'idle-a1' }))?.props).toMatchObject({ color: 'subtle' })
     await pane.unmount()
   })
 
@@ -334,6 +375,7 @@ describe('the desktop draws cards and charts', () => {
 
 // Host types, so a drawn tree is plain data to walk; a Button keeps its onPress to press.
 const EL = {
+  Client: 'Client',
   Box: 'Box',
   Text: 'Text',
   Button: (props: Record<string, unknown>) => ({ type: 'Button', props }),
@@ -561,7 +603,7 @@ describe('desktop: the timeline page', () => {
       },
     ]
 
-    for (const [columns, width] of [[50, 328], [80, 498], [95, 464], [120, 572]] as const) {
+    for (const [columns, width] of [[40, 328], [60, 498], [80, 464], [120, 572]] as const) {
       const drawn = drawDesktopPane(EL, paneOf({ page: 'timeline', timeline: turns, columns, agents: [runAgent({ agentId: 'c' })] }))
       const svgs = nodesOf(drawn, 'Svg')
 
@@ -601,8 +643,8 @@ describe('desktop: the timeline page', () => {
 
     expect(shownSteps(oldest)).toEqual([0, 1, 2])
     expect(buttonOf(oldest, '更早的步'), 'nothing before the first').toBeUndefined()
-    expect(shownSteps(draw({ columns: 50 }))).toEqual([18, 19, 20, 21, 22])
-    expect(shownSteps(draw({ columns: 50, timelinePage: { turnId: 't2', back: 1 } }))).toEqual([13, 14, 15, 16, 17])
+    expect(shownSteps(draw({ columns: 40 }))).toEqual([18, 19, 20, 21, 22])
+    expect(shownSteps(draw({ columns: 40, timelinePage: { turnId: 't2', back: 1 } }))).toEqual([13, 14, 15, 16, 17])
     expect(buttonOf(draw({ timelineTurnId: 't1' }), '更早的步'), 'two steps fit one page').toBeUndefined()
   })
 
@@ -650,6 +692,19 @@ const SNAP_ONE: MmSnapshot = {
 
 const roundCards = (drawn: unknown) => nodesOf(drawn, 'Box').filter(box => box.props?.borderStyle === 'round')
 
+describe('desktop: the page tabs', () => {
+  test('every tab sits in one row that wraps only when the pane is too narrow, at any width', () => {
+    setLang('zh-CN')
+
+    for (const columns of [40, 54, 120]) {
+      const row = nodesOf(drawDesktopPane(EL, paneOf({ columns })), 'Box')[1]
+
+      expect(row?.props?.flexWrap, String(columns)).toBe('wrap')
+      expect(nodesOf(row, 'Button').map(button => button.props?.label), String(columns)).toEqual(PAGES.map(one => one.label))
+    }
+  })
+})
+
 describe('desktop: the overview count card', () => {
   test('the first card is one line of bold chips: needs you, running, unread, aborted; failed gates count in needs you', () => {
     setLang('zh-CN')
@@ -661,7 +716,7 @@ describe('desktop: the overview count card', () => {
       runAgent({ agentId: 'a5', state: 'aborted', ...ENDED }),
     ]
     const drawn = drawDesktopPane(EL, paneOf({ agents, snap: SNAP_ONE, gates: [GATE_FAILED] }))
-    const countRow = nodesOf(drawn, 'Box').find(box => box.props?.columnGap === 1 && box.props?.flexWrap === 'wrap')
+    const countRow = nodesOf(drawn, 'Box').find(box => box.props?.columnGap === 1 && box.props?.flexWrap === 'wrap' && nodesOf(box, 'Button').length === 0)
     const chips = nodesOf(countRow, 'Text').filter(one => one.props?.bold === true)
 
     expect(chips.map(one => [textOf(one), one.props?.color])).toEqual([
@@ -676,7 +731,7 @@ describe('desktop: the overview count card', () => {
     setLang('zh-CN')
 
     const drawn = drawDesktopPane(EL, paneOf({ agents: [runAgent({})] }))
-    const countRow = nodesOf(drawn, 'Box').find(box => box.props?.columnGap === 1 && box.props?.flexWrap === 'wrap')
+    const countRow = nodesOf(drawn, 'Box').find(box => box.props?.columnGap === 1 && box.props?.flexWrap === 'wrap' && nodesOf(box, 'Button').length === 0)
     const text = textOf(countRow)
 
     expect(text).toContain('● 运行 1')
@@ -769,7 +824,7 @@ describe('desktop: the overview items', () => {
     expect(commandHead('cd /x && bun test')).toBe('bun test')
   })
 
-  test('no line is longer than its budget: columns - 12 beside a Button, columns - 2 otherwise', () => {
+  test('no line is longer than its budget: its text cells - 12 beside a Button, - 2 otherwise', () => {
     setLang('zh-CN')
 
     const expanded = new Set(['needsYou', 'sessions', 'running', 'gates', 'trees', 'guards'].map(section => `more:${section}`))
@@ -777,7 +832,7 @@ describe('desktop: the overview items', () => {
     for (const columns of [50, 80, 120]) {
       for (const disclosures of [new Set<string>(), expanded]) {
         const drawn = drawDesktopPane(EL, paneOf({ ...BUSY, columns, disclosures }))
-        const over = lineTexts(drawn).filter(one => widthOf(one.text) > columns - (one.isTitle ? 12 : 2))
+        const over = lineTexts(drawn).filter(one => widthOf(one.text) > textCells(columns) - (one.isTitle ? 12 : 2))
 
         expect(over.map(one => `${columns}: ${one.text}`)).toEqual([])
       }
@@ -847,12 +902,12 @@ describe('desktop: the overview items', () => {
     setLang('zh-CN')
 
     const gates = [gateOf('bun test a', { at: NOW - 7_510_000 }), gateOf('bun test b', { at: NOW - 1_653_000 }), gateOf('bun test c', { at: NOW - 33_000 })]
-    const metas = nodesOf(drawDesktopPane(EL, paneOf({ gates })), 'Text').filter(one => one.props?.color === 'subtle').map(textOf)
+    const text = textOf(withClocks(drawDesktopPane(EL, paneOf({ gates }))))
 
-    expect(metas).toContain('主树 · 2 fail · 33s前')
-    expect(metas).toContain('主树 · 2 fail · 27m前')
-    expect(metas).toContain('主树 · 2 fail · 2h05m前')
-    expect(metas.filter(text => text.includes('27m33s'))).toEqual([])
+    expect(text).toContain('主树 · 2 fail · 33s前')
+    expect(text).toContain('主树 · 2 fail · 27m前')
+    expect(text).toContain('主树 · 2 fail · 2h05m前')
+    expect(text).not.toContain('27m33s')
   })
 })
 
@@ -906,7 +961,7 @@ describe('desktop: the Agents page is one card per agent', () => {
     const svgWidth = (columns: number) =>
       nodesOf(drawDesktopPane(EL, paneOf({ page: 'agents', agents: AGENTS, columns })), 'Svg').map(svg => svg.props?.width)
 
-    expect(svgWidth(80)).toEqual([360, 360, 360, 360])
+    expect(svgWidth(60)).toEqual([360, 360, 360, 360])
     expect(svgWidth(40)).toEqual([224, 224, 224, 224])
   })
 
@@ -1176,5 +1231,11 @@ describe('desktop: the report reader', () => {
 
     expect(selectRow(40)?.props?.flexDirection).toBe('column')
     expect(selectRow(80)?.props?.flexDirection).toBe('row')
+  })
+})
+
+describe('desktop: model tones', () => {
+  test('a cancelled or skipped model is stale, as its status word and isFailedModel say; only FAIL is failed', () => {
+    expect(['RUNNING', 'DONE', 'STALE', 'CANCELLED', 'SKIP: no key', 'FAIL: exit 1'].map(status => modelTone({ status }))).toEqual(['running', 'done', 'stale', 'stale', 'stale', 'failed'])
   })
 })

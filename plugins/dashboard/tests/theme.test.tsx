@@ -9,8 +9,10 @@ import type { PaneData } from '../hooks/desktop'
 import { setLang } from '../hooks/i18n'
 import { reportOf, reviewOf } from '../hooks/runs'
 import { drawHotspotsDesktop, drawTimelineDesktop, hotspotLines, timelineLines } from '../hooks/timeline-view'
+import { foldBoard, foldLines, foldRequests } from '../hooks/progress'
 import { emptyDay, lastDays, requestNoted, skillNoted, weekOf } from '../hooks/usage'
-import type { AgentRun, BoardNode, BoardRead, DashReport, GateRun, TimelineTurn, UsageDay, WorktreeInfo } from '../types'
+import type { AgentRun, BoardEvent, BoardNode, BoardRead, DashReport, GateRun, RequestFields, TimelineTurn, UsageDay, WorktreeInfo } from '../types'
+import { withClocks } from './clocks'
 
 // Theme keys follow the host's light or dark theme; a color name or a hex is fixed and vanishes on one of them.
 const THEME_KEYS = ['text', 'inverseText', 'inactive', 'subtle', 'promptBorder', 'success', 'error', 'warning', 'permission', 'suggestion', 'claude']
@@ -373,6 +375,7 @@ const ROWS = [
   resultRow('build_preview', 'Bash', `<persisted-output>\nPreview (first 2KB):\n${BUILD_FAILED}\n...\n</persisted-output>`),
   resultRow('tests_unknown_pass', 'Bash', { stdout: ST_FAILED_ONLY, stderr: '', interrupted: false }),
   resultRow('tests_marker', 'Bash', { stdout: 'Test run with 4 tests in 1 suite passed after 0.1 seconds.\n** TEST FAILED **', stderr: '', interrupted: false }),
+  resultRow('open_progress', 'mcp__dashboard__open_progress', [{ type: 'text', text: 'opened' }]),
 ]
 
 const T0 = NOW - 96_000
@@ -456,21 +459,68 @@ const boardNode = (id: string, title: string, status: BoardNode['status'], hours
   summary: 'what changed and why',
   status,
   kind: 'feature',
+  done_when: 'a commit on main',
   builds_on,
   depends_on: [],
+  request: '',
+  discovered_from: '',
   at: NOW - hoursAgo * 3_600_000,
   updatedAt: NOW - hoursAgo * 3_600_000,
   commit: null,
 })
-/** The progress page with no storage chosen, an empty git board, and nodes in all four statuses: four done, so one waits behind a button. */
+const HOURS = 3_600_000
+const lineEvent = (id: string, name: string, hoursAgo: number): BoardEvent => ({
+  type: 'line',
+  line: id,
+  at: NOW - hoursAgo * HOURS,
+  session: 'other',
+  commit: null,
+  fields: { name, definition: `${name} work`, status: 'active', keys: { paths: [], scopes: [], patterns: [] } },
+})
+const askEvent = (id: string, title: string, hoursAgo: number, fields: RequestFields = {}): BoardEvent => ({
+  type: 'request',
+  request: id,
+  at: NOW - hoursAgo * HOURS,
+  session: 'other',
+  commit: null,
+  fields: { title, acceptance: ['it works'], status: 'open', ...fields },
+})
+const pieceEvent = (id: string, title: string, status: BoardNode['status'], request: string, hoursAgo: number, commit: string | null = null, discovered_from = ''): BoardEvent => ({
+  type: 'add',
+  node: id,
+  at: NOW - hoursAgo * HOURS,
+  session: 'other',
+  commit,
+  fields: { title, summary: 's', status, kind: 'feature', done_when: 'a commit on main', builds_on: [], depends_on: [], request, discovered_from },
+})
+const CLOSED: RequestFields = { status: 'closed', resolution: { by: 'person', evidence: 'accepted' } }
+/** A board as collectProgress folds it from `events`. */
+const boardRead = (events: BoardEvent[], current: string | null = null): BoardRead => ({
+  storage: 'local',
+  dir: '/h/.claude/progress/-r/events',
+  name: 'harness',
+  nodes: foldBoard(events),
+  requests: foldRequests(events, NOW),
+  lines: foldLines(events),
+  current,
+})
+const NO_REQUESTS = { name: 'harness', requests: [], lines: [], current: null }
+
+/**
+ * The progress page with no storage chosen, an empty git board, and nodes in all four statuses: four done, so one waits behind a button;
+ * then a doing node 25h without an update beside one 23h, a todo 48h old, an open node without done_when and a done one. Then requests
+ * on two lines: this session's open one with a follow-up, a ready one, a stale one, a closed one, one closed 9 days ago, one of no line,
+ * and an old node; a line whose three releases make a series beside another request; twelve nodes recorded before requests alone.
+ */
 const PROGRESS_READS: [string, BoardRead][] = [
-  ['progress-unchosen', { storage: null, dir: null, nodes: [] }],
-  ['progress-empty-git', { storage: 'git', dir: '/r/.notes/board/events', nodes: [] }],
+  ['progress-unchosen', { storage: null, dir: null, nodes: [], ...NO_REQUESTS }],
+  ['progress-empty-git', { storage: 'git', dir: '/r/.notes/board/events', nodes: [], ...NO_REQUESTS }],
   [
     'progress-all',
     {
       storage: 'local',
       dir: '/h/.claude/dashboard/board/-r/events',
+      ...NO_REQUESTS,
       nodes: [
         boardNode('n1', 'Usage ledger', 'done', 50),
         boardNode('n2', 'Usage page', 'done', 40),
@@ -482,14 +532,76 @@ const PROGRESS_READS: [string, BoardRead][] = [
       ],
     },
   ],
+  [
+    'progress-stale',
+    {
+      storage: 'local',
+      dir: '/h/.claude/dashboard/board/-r/events',
+      ...NO_REQUESTS,
+      nodes: [
+        boardNode('s1', 'Stale work', 'doing', 25),
+        boardNode('s2', 'Fresh work', 'doing', 23),
+        boardNode('s3', 'Old plan', 'todo', 48),
+        { ...boardNode('s4', 'Open ended', 'blocked', 4), done_when: '' },
+        boardNode('s5', 'Shipped', 'done', 30),
+      ],
+    },
+  ],
+  [
+    'progress-requests',
+    boardRead(
+      [
+        lineEvent('l1', 'dashboard', 300),
+        lineEvent('l2', 'release', 300),
+        askEvent('r1', 'Track the board by request', 5, { line: 'l1' }),
+        pieceEvent('p1', 'Write request events', 'done', 'r1', 3, '9c8d7e6'),
+        pieceEvent('p2', 'Score candidate lines', 'doing', 'r1', 0.05),
+        pieceEvent('p3', 'Daily tidy', 'todo', 'r1', 0.05),
+        pieceEvent('p4', 'Fix a found bug', 'todo', 'r1', 0.04, null, 'p2'),
+        askEvent('r2', 'README sync', 4, { line: 'l1' }),
+        pieceEvent('p5', 'Sync the English README', 'done', 'r2', 1, 'abc1234'),
+        pieceEvent('p6', 'Sync the Chinese README', 'done', 'r2', 1),
+        askEvent('r3', 'Release 0.8.6 cleanup', 100, { line: 'l2' }),
+        pieceEvent('p7', 'Drop old flags', 'todo', 'r3', 100),
+        askEvent('r4', 'Clock ticks each second', 30, { line: 'l1', ...CLOSED }),
+        pieceEvent('p8', 'Tick the clock', 'done', 'r4', 30),
+        askEvent('r5', 'Old closed work', 216, { line: 'l1', ...CLOSED }),
+        askEvent('r6', 'Loose request', 2),
+        pieceEvent('n0', 'Old node', 'done', '', 200),
+      ],
+      'r1',
+    ),
+  ],
+  [
+    'progress-series',
+    boardRead([
+      lineEvent('l1', 'release', 300),
+      askEvent('r1', 'Release 0.8.3', 72, { line: 'l1', ...CLOSED }),
+      askEvent('r2', 'Release 0.8.4', 48, { line: 'l1', ...CLOSED }),
+      askEvent('r3', 'Release 0.8.5', 3, { line: 'l1' }),
+      pieceEvent('p1', 'Tag', 'done', 'r3', 3, 'def5678'),
+      pieceEvent('p2', 'Notes', 'doing', 'r3', 1),
+      pieceEvent('p3', 'Upload', 'todo', 'r3', 1),
+      askEvent('r4', 'Fix the release notes', 2, { line: 'l1' }),
+    ]),
+  ],
+  [
+    'progress-legacy',
+    {
+      storage: 'local',
+      dir: '/h/.claude/progress/-r/events',
+      ...NO_REQUESTS,
+      nodes: Array.from({ length: 12 }, (_, i) => boardNode(`g${i}`, `Legacy work ${i}`, (['doing', 'blocked', 'todo', 'done'] as const)[i % 4]!, i + 1)),
+    },
+  ],
 ]
 
 const lineTree = (lines: Line[]) =>
   lines.map(line => ({ type: 'Text', props: {}, children: line.map(seg => ({ type: 'Text', props: { ...(seg.color !== undefined && { color: seg.color }) }, children: [seg.text] })) }))
 
 // Host types, so a drawn tree is plain data to walk.
-const EL = { Box: 'Box', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown' } as never
-const READER_EL = { Box: 'Box', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown', Code: 'Code', Select: 'Select', Input: 'Input' } as never
+const EL = { Box: 'Box', Client: 'Client', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown' } as never
+const READER_EL = { Box: 'Box', Client: 'Client', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown', Code: 'Code', Select: 'Select', Input: 'Input' } as never
 
 const READER_OUT = '/h/.claude/mmruns/r1/grok.out'
 const READER_REVIEW = {
@@ -713,14 +825,21 @@ describe('every color follows the theme', () => {
       test(`the prompt hint and a gate an edit made stale on ${surface} in ${lang}`, options, async ($, on) => {
         const clock = mock.clock(on, { now: NOW })
         const hints: unknown[] = []
+        const modes: unknown[] = []
         const limit = (percentUsed: number) => ({ kind: 'five_hour', percentUsed, resetsAt: new Date(NOW + 7_800_000).toISOString() })
+        const week = { kind: 'seven_day', percentUsed: 12, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() }
         const measure = (percentUsed: number) =>
-          $.session.measure({ context: { tokens: 85_000, window: 200_000, percent: 43 }, rateLimits: [limit(percentUsed)], cost: { usd: 3.41 }, changed: ['context', 'rateLimits', 'cost'] })
+          $.session.measure({ context: { tokens: 85_000, window: 200_000, percent: 43 }, rateLimits: [limit(percentUsed), week], cost: { usd: 3.41 }, changed: ['context', 'rateLimits', 'cost'] })
 
         on('session.root', () => ({ value: '/work' }))
         on('session.measure', ($, e) => ({ changed: e.changed }))
         on('ui.render', { component: 'PromptHint' }, ($, e) => {
           hints.push(e.props)
+
+          return BOTTOM as never
+        })
+        on('ui.render', { component: 'SessionMode' }, ($, e) => {
+          modes.push(e.props)
 
           return BOTTOM as never
         })
@@ -752,6 +871,9 @@ describe('every color follows the theme', () => {
         await $.ui.render({ component: 'PromptHint', surface, requestId: 'hint', viewport: { columns: 120, rows: 40, isFullscreen: true }, props: { isDraft: false, isWorking: false, hint: '? for shortcuts' } } as never)
         expect(JSON.stringify(hints.at(-1))).toMatch(/85k\/200k · 43% · 5h 40% · /)
         check(hints.at(-1), 'prompt-hint', surface, lang, found)
+        const sessionMode = await $.ui.render({ component: 'SessionMode', surface, requestId: 'session-mode', viewport: { columns: 120, rows: 40, isFullscreen: true }, props: { modes: ['plan'] } } as never)
+        expect(JSON.stringify(surface === 'desktop' ? sessionMode : modes.at(-1))).toMatch(surface === 'desktop' ? /"plan".*"5h 40% · .*"7d 12% · / : /^\{"modes":\["plan"\]\}$/)
+        check(sessionMode, 'session-mode', surface, lang, found)
         expect(found).toEqual([])
       })
 
@@ -893,7 +1015,7 @@ describe('every color follows the theme', () => {
         }
       })
 
-      test(`the progress page with 0 nodes and nodes in all four statuses on ${surface} in ${lang}`, () => {
+      test(`the progress page with 0 nodes, nodes in all four statuses, a stale node, done_when lines, requests on lines, a series and legacy nodes on ${surface} in ${lang}`, () => {
         setLang(lang)
 
         const isEn = lang === 'en'
@@ -901,10 +1023,10 @@ describe('every color follows the theme', () => {
         const scenes: [string, unknown][] = []
 
         for (const [where, board] of PROGRESS_READS) {
-          for (const columns of surface === 'terminal' ? [100, 50] : [50, 80, 120]) {
+          for (const columns of surface === 'terminal' ? [100, 60, 50] : [50, 80, 120]) {
             const progressPane: PaneData = { ...readerPane(READER_SCENES[0]![1], 0), page: 'progress', detail: null, columns, progress: board }
 
-            scenes.push([`${where}-${columns}`, surface === 'terminal' ? lineTree(progressLines(board, columns)) : drawDesktopPane(READER_EL, progressPane)])
+            scenes.push([`${where}-${columns}`, surface === 'terminal' ? lineTree(progressLines(board, columns, NOW)) : drawDesktopPane(READER_EL, progressPane)])
           }
         }
 
@@ -919,15 +1041,79 @@ describe('every color follows the theme', () => {
 
         expect(text(`progress-unchosen-${wide}`)).toContain(isEn ? 'not chosen yet' : '尚未选择')
         expect(text(`progress-empty-git-${wide}`)).toContain('/r/.notes/board/events')
-        expect(text(`progress-all-${wide}`), 'the groups in order').toMatch(isEn ? /In progress.*Blocked.*To do.*Done/ : /进行中.*受阻.*待办.*已完成/)
+        expect(text(`progress-all-${wide}`), 'old nodes under their own head').toContain(isEn ? 'No request · 7' : '未归入请求 · 7')
         expect(text(`progress-all-${wide}`), 'what a node builds on, by title').toContain(isEn ? 'builds on: Usage page, Ask reminder' : '基于：Usage page、Ask reminder')
-        expect(text(`progress-all-${wide}`), 'each status in its theme key').toMatch(/"permission".*"error".*"inactive".*"success"/)
+
+        if (surface === 'desktop') {
+          expect(text(`progress-all-${wide}`), 'the groups in order').toMatch(isEn ? /In progress.*Blocked.*To do.*Done/ : /进行中.*受阻.*待办.*已完成/)
+          expect(text(`progress-all-${wide}`), 'each status in its theme key').toMatch(/"permission".*"error".*"inactive".*"success"/)
+        } else {
+          expect(text(`progress-all-${wide}`), 'newest first').toMatch(isEn ? /To do.*In progress.*Blocked.*Done/ : /待办.*进行中.*受阻.*已完成/)
+          expect(text(`progress-all-${wide}`), 'each status in its theme key').toMatch(/"inactive".*"permission".*"error".*"success"/)
+        }
 
         if (surface === 'desktop') {
           expect(text('progress-all-80'), 'done newest first, the fourth behind a button').toMatch(isEn ? /Ask reminder.*Ask outcomes.*Usage page.*"1 more"/ : /Ask reminder.*Ask outcomes.*Usage page.*"另有 1 项"/)
           expect(text('progress-all-80')).not.toContain('Usage ledger')
         } else {
           expect(text('progress-all-100'), 'done newest first, all of them').toMatch(/Ask reminder.*Ask outcomes.*Usage page.*Usage ledger/)
+        }
+
+        const stale = text(`progress-stale-${wide}`)
+
+        expect(stale, 'the three open nodes with done_when, not the done one').toContain(isEn ? 'Done when: a commit on main' : '完成条件：a commit on main')
+        expect(stale.split('a commit on main').length - 1).toBe(3)
+        expect(stale, 'only the doing node 24h+ old').toContain(isEn ? ' · no update for 25h' : ' · 25 小时无更新')
+        expect(stale).not.toMatch(isEn ? /no update for (23|48)h/ : /(23|48) 小时无更新/)
+        expect(stale, 'its title inactive').toContain('"color":"inactive"},"children":[" Stale work"]')
+        expect(stale).not.toContain('"color":"inactive"},"children":[" Fresh work"]')
+
+        if (surface === 'desktop') {
+          expect(stale, 'Done and Drop on an open node').toContain('"progress-done-s1"')
+          expect(stale).toContain('"progress-drop-s1"')
+          expect(stale).toContain(isEn ? '"Drop"' : '"放弃"')
+          expect(stale, 'none on a done node').not.toContain('"progress-done-s5"')
+        } else {
+          expect(stale, 'the terminal draws no buttons').not.toContain('progress-done')
+        }
+
+        const flat = (node: unknown): string =>
+          typeof node === 'string' ? node : Array.isArray(node) ? node.map(flat).join('') : node !== null && typeof node === 'object' ? flat((node as { children?: unknown[] }).children ?? []) : ''
+        const words = (where: string) => flat(scenes.find(([name]) => name === where)![1])
+        const requests = words(`progress-requests-${wide}`)
+
+        expect(requests, 'a ready request waits for the person').toContain(isEn ? 'awaiting you' : '待验收')
+        expect(text(`progress-requests-${wide}`), 'in warning').toContain(`{"color":"warning"},"children":["${isEn ? 'awaiting you' : '待验收'}"]`)
+        expect(requests, 'the old node last').toMatch(isEn ? /Loose request.*No request · 1.*Old node/ : /Loose request.*未归入请求 · 1.*Old node/)
+        expect(words(`progress-legacy-${wide}`)).toContain(isEn ? 'No request · 12' : '未归入请求 · 12')
+
+        if (surface === 'desktop') {
+          expect(requests, 'the now frame: this session\'s request, the ready one, the stale one').toMatch(
+            isEn ? /Now.*Track the board by request.*this session.*README sync.*awaiting you.*Release 0\.8\.6 cleanup.*no update for 4d/ : /现在.*Track the board by request.*本会话.*README sync.*待验收.*Release 0\.8\.6 cleanup.*4 天无更新/,
+          )
+          expect(requests, 'a section per line, newest activity first, then no line').toMatch(isEn ? /DASHBOARD · 2 open · 2 closed.*RELEASE · 1 open · 0 closed.*No line · 1/ : /DASHBOARD · 进行中 2 · 已关闭 2.*RELEASE · 进行中 1 · 已关闭 0.*未归入工作线 · 1/)
+          expect(requests, 'the rollup and its follow-up').toContain(isEn ? '▰▱▱ 1/3 · 1 follow-up' : '▰▱▱ 1/3 · 1 个后续')
+          expect(requests, 'the closed ones as rows, a count with no piece left out').toContain('✓ Old closed work  9d')
+          expect(requests, 'a piece: its time, glyph, title and sha').toMatch(/✓ \d\d:\d\d Write request events {2}9c8d7e6/)
+
+          for (const key of ['progress-accept-r1', 'progress-dropreq-r1', 'progress-now-accept-r2', 'progress-done-p2', 'progress-drop-p3']) {
+            expect(text(`progress-requests-${wide}`), key).toContain(`"${key}"`)
+          }
+
+          expect(text(`progress-requests-${wide}`), 'no Done on a done piece').not.toContain('"progress-done-p1"')
+          expect(words('progress-series-80'), 'the series as one chain, oldest first').toContain(`RELEASE (${isEn ? 'series' : '系列'})`)
+          expect(words('progress-series-80')).toContain('0.8.3 ✓ ─ 0.8.4 ✓ ─ 0.8.5 ▸1/3')
+          expect(words('progress-series-80'), 'its other request as a card').toContain('Fix the release notes')
+          expect(text('progress-series-80')).toContain('"progress-accept-r4"')
+        } else {
+          expect(requests, 'the legend').toContain('D=dashboard  R=release')
+          expect(requests, 'the one closed 9 days ago folded').toContain(isEn ? '1 more closed' : '另有 1 个已关闭')
+          expect(requests).not.toContain('Old closed work')
+          expect(requests, 'the rollup with its follow-up').toContain('▰▱▱ 1/3 +1')
+          expect(requests, 'pieces under the open request, oldest first').toMatch(/Track the board by request.*↳ ✓ \d\d:\d\d Write request events +9c8d7e6.*↳ ▸ \d\d:\d\d Score candidate lines.*↳ ◌ {7}Daily tidy/)
+          expect(requests, 'the stale request quiet 4 days').toMatch(/Release 0\.8\.6 cleanup.*4d!/)
+          expect(words('progress-series-100'), 'the terminal lists the series as rows').toMatch(/Release 0\.8\.5.*Fix the release notes.*Release 0\.8\.4.*Release 0\.8\.3/)
+          expect(words('progress-legacy-100'), 'ten old nodes, then a count').toContain(isEn ? '2 more' : '另有 2 项')
         }
       })
 
@@ -1012,9 +1198,10 @@ describe('every color follows the theme', () => {
 
           for (const columns of [50, 80, 120]) {
             scenes.push(
-              [`overview-busy-${columns}`, drawDesktopPane(READER_EL, { ...busy, columns })],
-              [`overview-expanded-${columns}`, drawDesktopPane(READER_EL, { ...busy, columns, disclosures: new Set(['more:needsYou', 'tree:/r/.claude/worktrees/agent-1']) })],
-              [`overview-idle-${columns}`, drawDesktopPane(READER_EL, overviewPane({ columns, agents: [agent('d1', { state: 'done', ...ended })], seen: { agents: NOW, runs: NOW }, snap: null }))],
+              // Each clock as the Text it shows, so its color is checked too.
+              [`overview-busy-${columns}`, withClocks(drawDesktopPane(READER_EL, { ...busy, columns }))],
+              [`overview-expanded-${columns}`, withClocks(drawDesktopPane(READER_EL, { ...busy, columns, disclosures: new Set(['more:needsYou', 'tree:/r/.claude/worktrees/agent-1']) }))],
+              [`overview-idle-${columns}`, withClocks(drawDesktopPane(READER_EL, overviewPane({ columns, agents: [agent('d1', { state: 'done', ...ended })], seen: { agents: NOW, runs: NOW }, snap: null })))],
             )
           }
 
@@ -1027,11 +1214,13 @@ describe('every color follows the theme', () => {
           expect(found).toEqual([])
 
           const text = (where: string) => JSON.stringify(scenes.find(([name]) => name === where)![1])
+          const flatText = (node: unknown): string =>
+            typeof node === 'string' ? node : Array.isArray(node) ? node.map(flatText).join('') : node !== null && typeof node === 'object' ? flatText((node as { children?: unknown[] }).children ?? []) : ''
 
           expect(text('overview-busy-80'), 'four errored agents and three gates need you').toContain(isEn ? '"4 more"' : '"另有 4 项"')
           expect(text('overview-busy-80')).toContain("python3 - <<'EOF'")
           expect(text('overview-busy-80'), 'a heredoc shows its first body line, never its whole body').not.toContain('\\nEOF')
-          expect(text('overview-busy-80')).toContain(isEn ? 'agent-2 · 3 pass · stale · 1m ago' : 'agent-2 · 通过 3 · 过期 · 1m前')
+          expect(flatText(scenes.find(([name]) => name === 'overview-busy-80')![1])).toContain(isEn ? 'agent-2 · 3 pass · stale · 1m ago' : 'agent-2 · 通过 3 · 过期 · 1m前')
           expect(text('overview-expanded-80')).toContain(isEn ? '"Collapse"' : '"收起"')
           expect(text('overview-expanded-80')).toContain("cd '/r/.claude/worktrees/agent-1'")
           expect(text('overview-idle-80')).toContain(isEn ? 'Nothing needs you and nothing is running' : '没有需要你处理或运行中的任务')

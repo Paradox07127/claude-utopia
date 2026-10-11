@@ -86,7 +86,11 @@ export function askOutcomes(input: unknown, response: unknown): AskOutcome[] {
       return 'recommended'
     }
 
-    return question.multiSelect === true || labels.includes(answer) ? 'option' : 'typed'
+    if (labels.includes(answer)) {
+      return 'option'
+    }
+
+    return question.multiSelect === true && answer.split(', ').every(part => labels.includes(part)) ? 'option' : 'typed'
   })
 }
 

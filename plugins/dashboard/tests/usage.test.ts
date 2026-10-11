@@ -57,6 +57,7 @@ function seat(on: On): World {
   })
   on('fs.stat', ($, e) => ({ deny: `ENOENT ${e.path}` }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('tool.register', ($, e) => ({ value: { tool: `mcp__dashboard__${e.name}` } }))
   on('ui.open', () => ({ value: { isPlaced: true } }) as never)
   on('ui.close', () => ({ value: undefined }))
   on('ui.panes', () => ({ value: [] }))
@@ -125,9 +126,9 @@ const answered = ($: Engine, id: string, questions: unknown[], answers: Record<s
 
 const NO_ASKS = { dialogs: 0, questions: 0, recommended: 0, option: 0, typed: 0, declined: 0, under1m: 0, under2m: 0, under5m: 0, under10m: 0, over10m: 0 }
 
-/** The dialog of an AskUserQuestion call as the terminal draws it. */
-const dialogOf = (questions: unknown[]) =>
-  ({ plugin: PLUGIN, surface: 'terminal', component: 'AskUserQuestion', requestId: 'toolu_q', viewport: { columns: 100, rows: 40 }, props: { tool: 'AskUserQuestion', questions } }) as never
+/** The dialog of an AskUserQuestion call as the terminal draws it: its request id is the call's tool_use_id. */
+const dialogOf = (questions: unknown[], id = 'toolu_q') =>
+  ({ plugin: PLUGIN, surface: 'terminal', component: 'AskUserQuestion', requestId: id, viewport: { columns: 100, rows: 40 }, props: { tool: 'AskUserQuestion', questions } }) as never
 
 /** Every `$.ui.log` line. */
 function logsOf(on: On): string[] {
@@ -265,6 +266,34 @@ describe('usage ledger', () => {
     expect(lines.find(line => /^主线程\s+\d/.test(line))).toMatch(/^主线程\s+3\s+2\.1k\s+100%$/)
     await pane.unmount()
   })
+
+  test('a flush still writing when a newer one starts never lands last: the file ends with the newest counts', ZH, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    let isSlow = true
+
+    // Registered before seat: the first ledger write takes 1 s.
+    on('fs.write', { path: /^\/h\/\.claude\/dashboard\/usage\// }, async ($, e, next) => {
+      if (isSlow) {
+        isSlow = false
+        await clock.sleep(1_000)
+      }
+
+      return next(e)
+    })
+
+    const world = seat(on)
+
+    await $.session.start(SESSION)
+    await step($, 'm1', 'claude-opus-5-5')
+    await clock.advance(5_000)
+    await step($, 'm2', 'claude-opus-5-5')
+
+    const ended = end($, 'sa')
+
+    await clock.advance(1_000)
+    await ended
+    expect(fileOf(world, 'sa')?.models).toEqual({ 'claude-opus-5-5': { main: { requests: 2, input: 200, output: 100, cacheRead: 2_000, cacheWrite: 400 } } })
+  })
 })
 
 describe('question dialogs', () => {
@@ -284,6 +313,21 @@ describe('question dialogs', () => {
 
     expect(fileOf(world, 'sa')?.asks).toEqual({ ...NO_ASKS, dialogs: 2, questions: 5, recommended: 2, option: 2, typed: 1, under1m: 2 })
     expect(world.files[`${DIR}/${dayOf(NOW)}/sa.json`]).not.toMatch(/secret|Which/)
+  })
+
+  test('a multiSelect answer is an option only when each of its comma-joined parts is a label; typed text among them is typed', ZH, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const world = seat(on)
+    const labels = ['A (Recommended)', 'B', 'C']
+    const asked = [question('One?', labels, true), question('Two?', labels, true), question('Three?', labels, true), question('Four?', labels, true)]
+
+    await $.session.start(SESSION)
+    await shown($, asked)
+    await answered($, 'toolu_x', asked, { 'One?': 'my own idea', 'Two?': 'B, my own idea', 'Three?': 'B, C', 'Four?': 'A (Recommended), B' })
+    await end($, 'sa')
+
+    expect(fileOf(world, 'sa')?.asks).toEqual({ ...NO_ASKS, dialogs: 1, questions: 4, option: 2, typed: 2, under1m: 1 })
   })
 
   test('declined: a call that failed, a turn cancelled while its dialog waited; a result with no dialog shown is not counted', ZH, async ($, on) => {
@@ -384,7 +428,7 @@ describe('question dialogs', () => {
 
     await $.session.start(SESSION)
 
-    const call = $.tool.call({ tool: 'AskUserQuestion', questions: two } as never)
+    const call = $.tool.call({ tool: 'AskUserQuestion', questions: two, tool_use_id: 'toolu_q' } as never)
 
     await shown($, two)
 
@@ -416,7 +460,7 @@ describe('question dialogs', () => {
     on('tool.call', { tool: 'AskUserQuestion' }, () => new Promise(resolve => (answer = resolve)) as never)
     await $.session.start(SESSION)
 
-    const call = $.tool.call({ tool: 'AskUserQuestion', questions: one } as never)
+    const call = $.tool.call({ tool: 'AskUserQuestion', questions: one, tool_use_id: 'toolu_q' } as never)
     const dialog = await $.ui.mount(dialogOf(one))
 
     answer(typed)
@@ -425,6 +469,40 @@ describe('question dialogs', () => {
     await dialog.press({ key: 'ask-recommended' })
     expect(logs).toEqual([])
     await dialog.unmount()
+  })
+
+  test("two dialogs open at once: each one's button answers its own call, not the later one", ZH, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+
+    seat(on)
+    logsOf(on)
+
+    const first = [question('First?', ['a (Recommended)', 'b'])]
+    const second = [question('Second?', ['c', 'd (Recommended)'])]
+    const settled: string[] = []
+
+    on('tool.call', { tool: 'AskUserQuestion' }, ($, e, next) => new Promise(resolve => next.signal.addEventListener('abort', () => resolve({ deny: 'closed' }))) as never)
+    await $.session.start(SESSION)
+
+    const a = $.tool.call({ tool: 'AskUserQuestion', questions: first, tool_use_id: 'toolu_a' } as never)
+    const b = $.tool.call({ tool: 'AskUserQuestion', questions: second, tool_use_id: 'toolu_b' } as never)
+
+    void a.then(() => settled.push('a'))
+    void b.then(() => settled.push('b'))
+
+    const earlier = await $.ui.mount(dialogOf(first, 'toolu_a'))
+
+    await earlier.press({ key: 'ask-recommended' })
+    await clock.settle()
+    expect(settled).toEqual(['a'])
+    expect(await a).toMatchObject({ result: { answers: { 'First?': 'a (Recommended)' } } })
+
+    const later = await $.ui.mount(dialogOf(second, 'toolu_b'))
+
+    await later.press({ key: 'ask-recommended' })
+    expect(await b).toMatchObject({ result: { answers: { 'Second?': 'd (Recommended)' } } })
+    await earlier.unmount()
+    await later.unmount()
   })
 
   test('the button shows only when every question has exactly one recommended option', ZH, async ($, on) => {

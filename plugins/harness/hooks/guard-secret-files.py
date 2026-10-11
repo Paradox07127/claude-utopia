@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""PreToolUse/Bash|Read|Edit|MultiEdit|Write|Grep: refuse tool calls that would put the contents of API-key config files
+"""PreToolUse/Bash|Read|Edit|Write|Grep: refuse tool calls that would put the contents of API-key config files
 into the transcript (Read / Edit results, Grep content, shell output such as cat, jq, diff or an environment dump).
 
 Shell is parsed as text: this guards against agent mistakes, not adversarial bypass.
 """
 import fnmatch
+import glob
 import json
 import os
 import re
@@ -25,6 +26,7 @@ MENTION = re.compile(r"\.claude\.json|\.claude/settings\.json|\.claude/settings\
 SPLIT = re.compile(r"&&|\|\||\$\(|[;&|()\n`]")
 HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1([^\n]*)\n(.*?)\n\s*\2\s*(?=\n|$)", re.S)
 SHELL_FED = re.compile(r"(?:ba|z|da|k)?sh|python[\d.]*|node|ruby|perl|osascript")
+SHELLS = re.compile(r"(?:ba|z|da|k)?sh")
 MESSAGE_FLAGS = {"-m", "--message", "-t", "--title", "-b", "--body"}  # gh / git: the next word is text, not a file
 WRAPPERS = {"sudo", "command", "time", "nohup"}
 ASSIGN = re.compile(r"^[A-Za-z_]\w*=")
@@ -34,7 +36,7 @@ SECRET_VAR = re.compile(r"KEY|TOKEN|SECRET|PASSWORD", re.I)
 REASON = ("Blocked: `{call}` would put the contents of {file} into the transcript. That file holds API keys, and whatever "
           "this call reads or prints is saved in the transcript. Ask the user to look at or change it; to check it, use "
           "metadata only (ls, stat, wc, grep -c / grep -l); to find where the file name is mentioned in other files, "
-          "use the Grep tool.")
+          "use grep -l or rg -l in Bash.")
 ENV_REASON = ("Blocked: `{call}` would print environment variables into the transcript, and some of them hold API keys or "
               "tokens that would be saved there. Print one named variable that is not a secret instead (printenv HOME).")
 
@@ -60,12 +62,30 @@ def holds_secret(path):
 
 
 def env_dump(words):
-    name, args = words[0], words[1:]
-    return ((name == "env" and set(args) <= {"-0", "--null"})
-            or (name == "printenv" and (not args or any(SECRET_VAR.search(a) for a in args)))
+    name, args = os.path.basename(words[0]), words[1:]
+    if name == "env":
+        while args and (args[0] in ("-0", "--null", "-u") or ASSIGN.match(args[0])):
+            args = args[2:] if args[0] == "-u" else args[1:]
+        return not args
+    if name in ("declare", "typeset"):
+        options = [a for a in args if a[:1] in "-+"]
+        # zsh `typeset NAME` and `-p NAME` print the value; `-x NAME` or an assignment NAME=V prints nothing
+        names = [a for a in args if a[:1] not in "-+" and "=" not in a]
+        return ((len(options) == len(args) and not any(c in a for a in options for c in "fF"))
+                or ((not options or any("p" in o for o in options)) and any(SECRET_VAR.search(a) for a in names)))
+    return ((name == "printenv" and (not args or any(SECRET_VAR.search(a) for a in args)))
             or (name == "export" and args in ([], ["-p"]))
-            or (name in ("declare", "typeset") and args == ["-x"]) or (name == "declare" and args == ["-p"])
             or (name == "set" and not args))
+
+
+def prints_secret_var(segment, words):
+    if os.path.basename(words[0]) not in ("echo", "printf"):
+        return False
+    # $NAME inside single quotes is not expanded; double-quoted strings are kept whole so their ' is literal
+    text = re.sub(r"\"(?:\\.|[^\"\\])*\"|'[^']*'", lambda m: m.group(0) if m.group(0)[0] == '"' else "", segment)
+    # \$NAME is literal, \\$NAME is not; ${NAME:+text} and ${NAME+text} print only the text
+    names = re.findall(r"(?<!\\)(?:\\\\)*\$(?:([A-Za-z_]\w*)|\{([A-Za-z_]\w*)(?!\w|:?\+))", text)
+    return any(SECRET_VAR.search(a + b) for a, b in names)
 
 
 def allowed(words):
@@ -95,12 +115,12 @@ def simple_commands(command):
             yield segment, words
 
 
-def drop_heredocs(command):
-    """The command without heredoc bodies that are only text: kept when fed to a shell or interpreter,
+def drop_heredocs(command, readers=SHELL_FED):
+    """The command without heredoc bodies that are only text: kept when fed to a program `readers` matches,
     or when an unquoted delimiter lets the body run $( ) or backticks."""
     def body(m):
         line = command[command.rfind("\n", 0, m.start()) + 1:m.start()] + m.group(3)
-        fed = any(SHELL_FED.fullmatch(os.path.basename(words[0])) for _, words in simple_commands(line))
+        fed = any(readers.fullmatch(os.path.basename(words[0])) for _, words in simple_commands(line))
         expands = not m.group(1) and re.search(r"\$\(|`", m.group(4))
         return m.group(0) if fed or expands else m.group(3)
     return HEREDOC.sub(body, command)
@@ -108,11 +128,17 @@ def drop_heredocs(command):
 
 def check_bash(command, cwd):
     """(reason template, call, file) for the first refused simple command, or None."""
-    for segment, words in simple_commands(drop_heredocs(command)):
-        if env_dump(words):
+    # Code fed to python, node and the like is not shell: a word such as `set` there dumps nothing
+    for segment, words in simple_commands(drop_heredocs(command, SHELLS)):
+        if env_dump(words) or prints_secret_var(segment, words):
             return ENV_REASON, segment.strip(), None
+    cwds = {cwd}
+    for segment, words in simple_commands(drop_heredocs(command)):
+        message = os.path.basename(words[0]) in ("gh", "git")
+        if os.path.basename(words[0]) == "cd" and len(words) == 2:
+            cwds |= {p for c in cwds for p in paths(words[1], c)}  # a cd inside ( ) leaves the outer cwd as it was
         text = segment
-        if os.path.basename(words[0]) in ("gh", "git"):
+        if message:
             text = " ".join(w for i, w in enumerate(words) if not (i and words[i - 1] in MESSAGE_FLAGS)
                             and not re.match(r"--(?:message|title|body)=", w))
         mention = MENTION.search(text)
@@ -120,23 +146,37 @@ def check_bash(command, cwd):
             return REASON, segment.strip(), mention.group(0)
         # A recursive search of a directory such as ~/.codex prints lines of the secret files inside it
         if os.path.basename(words[0]) in ("grep", "egrep", "rg") and not allowed(words):
-            hit = next((a for a in words[1:] if not a.startswith("-") and any(holds_secret(p) for p in paths(a, cwd))), None)
+            hit = next((a for a in words[1:] if not a.startswith("-")
+                        and any(holds_secret(p) for c in cwds for p in paths(a, c))), None)
             if hit:
                 return REASON, segment.strip(), f"a file under {hit}"
+        if not allowed(words):
+            for i, a in enumerate(words[1:], 1):
+                if a.startswith("-") or (message and words[i - 1] in MESSAGE_FLAGS):
+                    continue
+                found = {p for c in cwds for p in paths(a, c)}
+                if re.search(r"[*?[]", a):
+                    found |= {q for p in found for g in glob.glob(p) for q in paths(g, "/")}
+                if any(is_secret(p) for p in found):
+                    return REASON, segment.strip(), a
     return None
 
 
 def check(tool, tool_input, cwd):
     if tool == "Bash":
         return check_bash(tool_input["command"], cwd)
-    if tool in ("Read", "Edit", "MultiEdit", "Write"):
+    if tool in ("Read", "Edit", "Write"):
         path = tool_input["file_path"]
         if any(is_secret(p) for p in paths(path, cwd)):
             return REASON, f"{tool} {path}", path
     if tool == "Grep" and tool_input.get("output_mode") == "content":
         path = tool_input.get("path") or "."
-        if any(is_secret(p) or holds_secret(p) for p in paths(path, cwd)):
+        if any(is_secret(p) or holds_secret(p) or any(os.path.exists(os.path.join(p, n)) for n in SECRET_NAMES)
+               for p in paths(path, cwd)):
             return REASON, f"Grep (output_mode content) in {path}", f"a file under {path}"
+        pattern = tool_input.get("glob")
+        if pattern and re.sub(r"^(?:\*\*/)+", "", pattern) in SECRET_NAMES:
+            return REASON, f"Grep (output_mode content) in {path} with glob {pattern}", pattern
     return None
 
 

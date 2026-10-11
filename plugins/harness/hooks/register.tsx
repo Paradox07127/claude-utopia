@@ -72,7 +72,8 @@ function transcriptTtl(tail: string): CacheTtl | null {
 async function compactIdle($: EngineInterface, language: unknown): Promise<void> {
   idleTimer = null
   if (((await $.session.usage()).context.tokens ?? 0) < (await compactRule($)).minTokens) return
-  const done = await $.session.compact().catch(() => undefined)
+  // A headless (SDK, desktop app) session refuses $.session.compact but still runs /compact.
+  const done = await $.session.compact().catch(() => $.command.run({ command: 'compact' }).then(() => ({ skip: undefined })).catch(() => undefined))
   if (done === undefined || done.skip !== undefined) return
   await update($, idle, was => ({ ...was, lastReplyAt: null }))
   $.ui.toast(strings[await resolveLang($, language)].idleCompacted)
@@ -95,7 +96,7 @@ export const register: Register = (on, options) => {
     const model = e.model?.toLowerCase()
     const hit = model === undefined ? undefined : blocked.find(name => model.includes(name.toLowerCase()))
     return hit !== undefined
-      ? { deny: `harness: subagents never use ${hit}. Use opus, or omit model and let the agent definition decide.` }
+      ? { deny: `harness: subagents never use ${hit}. Omit model; the agent definition sets it.` }
       : next(e)
   }).catch(($, e, next) => {
     // It cannot tell whether the model was blocked, so it fails closed: undefined would leave the hook absent and let the spawn through.

@@ -6,12 +6,13 @@ import { drawDesktopBand, drawDesktopPane } from '../hooks/desktop'
 import type { PaneData } from '../hooks/desktop'
 import { setLang, t } from '../hooks/i18n'
 import type { Lang } from '../hooks/i18n'
+import { withClocks } from './clocks'
 
 const HAN = /\p{Script=Han}/u
 const NOW = 1_790_922_800_000
 const RUNID = '20261002-010000-aaaa'
 // Host types, so a drawn tree is plain data to walk.
-const EL = { Box: 'Box', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown', Code: 'Code', Input: 'Input', Select: 'Select' } as never
+const EL = { Box: 'Box', Client: 'Client', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown', Code: 'Code', Input: 'Input', Select: 'Select' } as never
 const noop = () => {}
 
 const agent = (over: Partial<AgentRun>): AgentRun => ({
@@ -164,7 +165,7 @@ function drawn(lang: Lang): string[] {
   const items = [...view.pending, ...view.running, ...view.recent]
   const idle = { agents: [agent({ agentId: 'a4', state: 'done', answer: 'all done', ...ENDED })], snap: null, seen: { agents: NOW, runs: NOW }, peers: [], gates: [] }
 
-  return stringsOf([
+  return stringsOf(withClocks([
     drawDesktopBand(EL, [idleLine(undefined, undefined, NOW)], noop),
     drawDesktopBand(EL, [idleLine(view.recent[0], GATES[1], NOW)], noop),
     ...[1, 2, 3, 5].map(rows => drawDesktopBand(EL, bandLines(board, rows, 100), noop)),
@@ -193,7 +194,7 @@ function drawn(lang: Lang): string[] {
     // The severity Select draws only for a review JSON; the fixture report is markdown.
     t().onlyMajor,
     t().allSeverities,
-  ])
+  ]))
 }
 
 describe('desktop and board strings', () => {
@@ -224,7 +225,8 @@ describe('desktop and board strings', () => {
       '最近门禁',
       '✓ 通过',
       '✗ 失败',
-      '1m前',
+      // An age is a clock between the gate's words and 前.
+      '\n前\n',
       '主树 · ',
       '\n工作树\n',
       '另有 4 项',

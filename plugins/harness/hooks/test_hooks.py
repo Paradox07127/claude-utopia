@@ -189,6 +189,17 @@ with tempfile.TemporaryDirectory() as tmp:
     last = (entries() or [{}])[-1]
     expect("日志 缺 cwd/agent_id 记 null", (code, len(entries()), last.get("cwd", 0), last.get("agent_id", 0)),
            (2, 4, None, None))
+    # git 卡住:hooks.json 给守卫 10 秒,超时被杀的 hook 不拦命令,所以守卫得在那之前自己拦下
+    slowgit = f"{tmp}/slowgit"
+    os.makedirs(slowgit)
+    pathlib.Path(slowgit, "git").write_text("#!/bin/sh\nexec sleep 6\n")
+    os.chmod(f"{slowgit}/git", 0o755)
+    try:
+        got = run(GUARD, event("git checkout a.swift"), dict(os.environ, PATH=f"{slowgit}:{os.environ['PATH']}"),
+                  home=f"{tmp}/home-slow")[0]
+    except subprocess.TimeoutExpired:
+        got = "10 秒内没退出"
+    expect("git 卡住时 checkout <文件> 在 hook 超时前拦", got, 2)
     readonly = f"{tmp}/home-ro"
     os.makedirs(readonly)
     open(f"{readonly}/.claude", "w").close()
@@ -227,7 +238,7 @@ with tempfile.TemporaryDirectory() as tmp:
                  "~/.claude/settings.local.json", "$HOME/.codex/config.toml.bak", "${HOME}/.codex/auth.json",
                  f"{home}/.openviking/x", f"{home}/.grok/auth.json", f"{home}/.claude/file-history/s/a@v1", f"{home}/.codex/shell_snapshots/a.sh", ".claude.json", "/srv/ov/ovcli.conf", "ov.conf"]:
         expect(f"secret 拦 Read [{path}]", secret("Read", {"file_path": path})[0], 2)
-    for tool in ["Edit", "MultiEdit", "Write"]:
+    for tool in ["Edit", "Write"]:
         expect(f"secret 拦 {tool} ~/.claude/settings.json", secret(tool, {"file_path": f"{home}/.claude/settings.json"})[0], 2)
     for path in [f"{home}/.claude/CLAUDE.md", f"{proj}/.claude/settings.json", f"{home}/harness/a.md", "prov.conf"]:
         expect(f"secret 放行 Read [{path}]", secret("Read", {"file_path": path})[0], 0)
@@ -249,7 +260,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 "cp ~/.claude/backups/a.json /tmp/", "cat ov.conf", "cat ~/.codex/shell_snapshots/a.sh", "rg KEY ~/.claude/file-history", "env", "env | sort", "env -0", "printenv",
                 "printenv OPENVIKING_API_KEY", "printenv GH_TOKEN", "export", "export -p", "declare -x", "declare -p",
                 "typeset -x", "set", "true; set", "cat <<'EOF' | bash\ncat ~/.claude.json\nEOF",
-                "cat <<EOF\n$(cat ~/.claude.json)\nEOF", "gh pr create --title t --body-file ~/.codex/config.toml"]:
+                "cat <<EOF\n$(cat ~/.claude.json)\nEOF", "gh pr create --title t --body-file ~/.codex/config.toml",
+                "bash <<'EOF'\nset\nEOF", "sh <<'EOF'\nenv\nEOF"]:
         expect(f"secret 拦 Bash [{cmd.splitlines()[0]}]", sh(cmd), 2)
     for cmd in ["stat ~/.claude.json", "grep -c token ~/.codex/config.toml", "ls -la ~/.openviking",
                 "chmod 600 ~/.claude/settings.json", "env -i PATH=/usr/bin ls", "printenv HOME", "cat README.md",
@@ -258,11 +270,51 @@ with tempfile.TemporaryDirectory() as tmp:
                 "test -f ~/.codex/auth.json && echo yes", "env FOO=1 ls", "grep -rn todo ~/proj", "grep -rl token ~/.codex", "set -e", "export A=1", "declare -x A=1",
                 "git commit -m \"$(cat <<'EOF'\ndocs: explain the hook in ~/.claude/settings.json\nEOF\n)\"",
                 "cat > docs/setup.md <<'EOF'\nAdd the hook to ~/.claude/settings.json\nEOF",
-                "gh pr create --title t --body 'Reads ~/.codex/config.toml only via stat'"]:
+                "gh pr create --title t --body 'Reads ~/.codex/config.toml only via stat'",
+                "python3 - <<'EOF'\nimport collections\nd = collections.defaultdict(set)\nEOF",
+                "node - <<'EOF'\nconst set = new Set()\nEOF"]:
         expect(f"secret 放行 Bash [{cmd.splitlines()[0]}]", sh(cmd), 0)
 
+    # 外部审查复现的绕过:env 路径/赋值、declare/typeset、echo 密钥变量、cd 与相对路径、通配符、Grep glob
+    for rel in ["proj/a.md", "../srv/a.py", "../ovdir/ov.conf"]:
+        os.makedirs(os.path.dirname(f"{home}/{rel}"), exist_ok=True)
+        pathlib.Path(home, rel).write_text("fake\n")
+    pathlib.Path(proj, "config.toml").write_text("fake\n")
+    for cmd in ["/usr/bin/env", "env FOO=1", "env -u FOO", "declare", "typeset", "typeset -p",
+                "declare -p OPENAI_API_KEY", "echo $OPENAI_API_KEY", "printf '%s\\n' \"$GH_TOKEN\"",
+                "echo \"${GH_TOKEN:-none}\"", "cd ~/.codex && cat auth.json", "cat ~/.codex/*", "head ~/.claude/*"]:
+        expect(f"secret 拦 Bash [{cmd}]", sh(cmd), 2)
+    expect("secret 拦 Bash cwd 为 ~/.codex 时 [cat config.toml]",
+           secret("Bash", {"command": "cat config.toml"}, f"{home}/.codex")[0], 2)
+    for cmd in ["env FOO=1 python3 x.py", "/usr/bin/env python3 x.py", "declare -a arr", "typeset -i n=1",
+                "declare -f fn", "echo $PATH", "echo '$OPENAI_API_KEY'",
+                "curl -H \"Authorization: Bearer $GH_TOKEN\" https://example.com", "cd ~/.codex && ls",
+                "cd /tmp && cat notes.txt", "cat ~/proj/*.md", "ls ~/.codex/*"]:
+        expect(f"secret 放行 Bash [{cmd}]", sh(cmd), 0)
+    expect("secret 放行 Bash cwd 为项目目录时 [cat config.toml]", secret("Bash", {"command": "cat config.toml"}, proj)[0], 0)
+    grep = lambda path, **kw: secret("Grep", dict(pattern="key", output_mode="content", path=path, **kw))[0]
+    expect("secret 拦 Grep content glob=ovcli.conf", grep(f"{tmp}/srv", glob="ovcli.conf"), 2)
+    expect("secret 拦 Grep content 目录直接含 ov.conf", grep(f"{tmp}/ovdir"), 2)
+    expect("secret 放行 Grep content glob=*.py 且目录里没有密钥文件", grep(f"{tmp}/srv", glob="*.py"), 0)
+
+    # 外部审查:子 shell 里的 cd 不改外面的 cwd;Grep glob、declare/typeset、echo 只拦会打印值的形式
+    expect("secret 拦 Bash cwd 为 ~/.codex 时 [(cd /tmp && pwd); grep -R token .]",
+           secret("Bash", {"command": "(cd /tmp && pwd); grep -R token ."}, f"{home}/.codex")[0], 2)
+    for pattern in ["ovcli.conf", "**/ov.conf"]:
+        expect(f"secret 拦 Grep content glob={pattern}", grep(f"{tmp}/srv", glob=pattern), 2)
+    for pattern in ["*", "*.conf"]:
+        expect(f"secret 放行 Grep content glob={pattern} 且目录里没有密钥文件", grep(f"{tmp}/srv", glob=pattern), 0)
+    for cmd in ["typeset OPENAI_API_KEY", "declare -p OPENAI_API_KEY", "typeset -p GH_TOKEN", "echo $OPENAI_API_KEY",
+                "echo \"${OPENAI_API_KEY}\"", "echo \"${OPENAI_API_KEY:-none}\"", "declare -px OPENAI_API_KEY",
+                "declare -p -x OPENAI_API_KEY", "echo \"\\\\$OPENAI_API_KEY\""]:
+        expect(f"secret 拦 Bash [{cmd}]", sh(cmd), 2)
+    for cmd in ["declare -x OPENAI_API_KEY", "typeset -x OPENAI_API_KEY", "echo \"\\$OPENAI_API_KEY\"",
+                "echo \"${OPENAI_API_KEY:+configured}\"", "echo \"${OPENAI_API_KEY+configured}\"",
+                "echo \"${GH_TOKEN_PATH:+set}\""]:
+        expect(f"secret 放行 Bash [{cmd}]", sh(cmd), 0)
+
     code, _, err = secret("Read", {"file_path": f"{home}/.claude.json"})
-    expect("secret 拒绝原因说明文件和替代做法", (code, "API keys" in err, ".claude.json" in err, "Grep tool" in err),
+    expect("secret 拒绝原因说明文件和替代做法", (code, "API keys" in err, ".claude.json" in err, "rg -l in Bash" in err),
            (2, True, True, True))
     code, _, err = secret("Bash", {"command": "env | sort"})
     expect("secret env 拒绝原因说明改打一个变量", (code, "named variable" in err), (2, True))
@@ -305,7 +357,8 @@ def tool_call_violations(source):
             items = value[1:value.find("]")].split(",")
         else:
             items = [re.split(r"[,}\n]", value)[0]]
-        literals = [re.fullmatch(r"""\s*(['"])([^'"]*)\1\s*""", s) for s in items if s.strip()]
+        consts = dict(re.findall(r"""^const\s+(\w+)\s*=\s*(['"][^'"\n]*['"])\s*$""", source, re.M))
+        literals = [re.fullmatch(r"""\s*(['"])([^'"]*)\1\s*""", consts.get(s.strip(), s)) for s in items if s.strip()]
         if not tool or not literals or not all(lit and "Bash" not in lit.group(2) for lit in literals):
             found.append(f"tool.call 可能匹配 Bash: {call}")
     return found
@@ -329,6 +382,9 @@ for hostile in ["on('tool.call', { tool: 'Bash' }, async ($, e, next) => next())
                 "on('*', h)"]:
     got = tool_call_violations(f"export default ({{ on }}) => {{\n  {hostile}\n}}\n")
     expect(f"#92533 对照判违规 [{hostile}]", len(got), 1)
+for name, want in [("'mcp__dashboard__open_progress'", 0), ("'Bash'", 1), ("`Bash`", 1)]:
+    got = tool_call_violations(f"const TOOL = {name}\nexport default ({{ on }}) => {{\n  on('tool.call', {{ tool: TOOL }}, h)\n}}\n")
+    expect(f"#92533 同文件常量 TOOL = {name}", len(got), want)
 
 print(f"\n{'全部通过' if not failures else f'{len(failures)} 条失败'}")
 sys.exit(1 if failures else 0)

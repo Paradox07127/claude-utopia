@@ -7,8 +7,8 @@ import { t } from './i18n'
 // The dialog's width when no surface has measured it.
 const ASK_COLUMNS = 80
 
-// What the button does: answers the pending AskUserQuestion call, the latest one whose every question has a recommended option.
-let press: (() => void) | null = null
+// What each dialog's button does, by its call's tool_use_id. The engine documents requestId = tool_use_id only for ToolResult, so a lone pending dialog also answers a button whose id is not found.
+const presses = new Map<string, () => void>()
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 
@@ -24,18 +24,18 @@ export function recommendedLabels(questions: readonly unknown[]): string[] | nul
   return labels.length > 0 && labels.every(label => label !== null) ? (labels as string[]) : null
 }
 
-/** Makes a call the pending dialog, replacing any before it: `pressed` resolves when the button is pressed; `done` clears it unless a later call took over. */
-export function awaitPress(): { pressed: Promise<null>; done: () => void } {
+/** Makes call `id` a pending dialog: `pressed` resolves when its own button is pressed; `done` clears it. */
+export function awaitPress(id: string): { pressed: Promise<null>; done: () => void } {
   let mine: () => void = () => undefined
   const pressed = new Promise<null>(resolve => (mine = () => resolve(null)))
 
-  press = mine
+  presses.set(id, mine)
 
   return {
     pressed,
     done: () => {
-      if (press === mine) {
-        press = null
+      if (presses.get(id) === mine) {
+        presses.delete(id)
       }
     },
   }
@@ -68,7 +68,7 @@ export function registerAskRecommended(on: On): void {
           <Text color="subtle" wrap="truncate">
             {fit(t().recommendedLine(labels), columns)}
           </Text>
-          <Button key="ask-recommended" label={label} variant="secondary" onPress={() => press?.()} />
+          <Button key="ask-recommended" label={label} variant="secondary" onPress={() => (presses.get(e.requestId) ?? (presses.size === 1 ? [...presses.values()][0] : undefined))?.()} />
         </Box>
         {await next(e)}
       </Box>

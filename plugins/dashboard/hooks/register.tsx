@@ -6,6 +6,7 @@ import type {
   AgentRun,
   BoardEvent,
   BoardRead,
+  BoardRequest,
   DashCache,
   DashDetail,
   DashPage,
@@ -21,6 +22,7 @@ import type {
   MmModel,
   MmRun,
   MmSnapshot,
+  RequestFields,
   SessionPresence,
   SessionPresenceState,
   TimelineTurn,
@@ -49,6 +51,7 @@ import {
   limitText,
   MAX_BAND_ROWS,
   nextBandChange,
+  nextOverviewChange,
   OVERVIEW_GATES,
   OVERVIEW_TREES,
   overviewCounts,
@@ -68,13 +71,16 @@ import {
 } from './board'
 import type { ButtonRow, ColdCache, Line, OverviewItem, Seg } from './board'
 import { drawDesktopBand, drawDesktopPane, drawDesktopPaneError, posixQuote } from './desktop'
+import type { PaneData } from './desktop'
+import { FILL, horizontalGauge } from './desktop-svg'
 import { attentionChime } from './chime'
 import { failureLine, isFirstTime } from './failures'
 import { bar, hostsOf, isHostName, sshArgv, sshHostOf, takeSamples } from './gpu-probe'
 import { pickLang, setLang, t } from './i18n'
 import type { Lang } from './i18n'
-import { boardDir, eventsDir, foldBoard, parseBoardEvents, parseStorage } from './progress'
+import { boardDir, canvasBatches, canvasPath, canvasProject, canvasWrites, closeEvents, eventsDir, foldBoard, foldLines, foldRequests, NO_CHECKS, parseBoardEvents, parseStorage } from './progress'
 import type { BoardStorage } from './progress'
+import { onRecording } from './progress-hooks'
 import { endToast, parseKv, reportOf, reviewOf, runLabel, RUNID } from './runs'
 import { SHAPE } from './shapes'
 import { summarizeTests } from './summarize-tests'
@@ -111,7 +117,15 @@ const COMMANDS = [
   { name: 'mmrun', description: "Open the workbench's Reviews page: recent mmrun runs and their status", immediate: true },
   { name: 'gpu', description: "Open the workbench's GPU page to watch an ssh host's GPUs", argumentHint: '<host>', immediate: true },
   { name: 'timeline', description: "Open the workbench's Timeline page: the main loop's turns as a waterfall of requests and tools", immediate: true },
+  { name: 'progress', description: "Open the workbench's Progress page: this project's progress board", immediate: true },
 ] as const
+const OPEN_PROGRESS = {
+  name: 'open_progress',
+  description:
+    "Open the workbench's Progress page (this project's progress board) for the person, and show a button in the transcript that opens it again. Call it when the person asks to see progress or the board.",
+  inputSchema: { type: 'object', properties: {} },
+}
+const OPEN_PROGRESS_TOOL = 'mcp__dashboard__open_progress'
 // The GPU ssh sends a pass this often (gpu-probe.ts); a dropped one is retried after it, doubling up to GPU_RETRY_MAX_MS.
 const GPU_POLL_MS = 3000
 const GPU_RETRY_MAX_MS = 60_000
@@ -190,6 +204,7 @@ const timelineTurn = atom({ plugin: 'dashboard', key: 'timelineTurn' } as const,
 const timelineView = atom({ plugin: 'dashboard', key: 'timelineView' } as const, 'turn' as DashTimelineView)
 const timelinePage = atom({ plugin: 'dashboard', key: 'timelinePage' } as const, null as DashTimelinePage | null, { shape: SHAPE })
 const tick = atom({ plugin: 'dashboard', key: 'tick' } as const, 0)
+const paneWake = atom({ plugin: 'dashboard', key: 'paneWake' } as const, 0)
 const peek = atom({ plugin: 'dashboard', key: 'peek' } as const, null as AgentPeek | null, { shape: SHAPE })
 const agentsFoldOpen = atom({ plugin: 'dashboard', key: 'agentsFoldOpen' } as const, false)
 const agentsSeenBefore = atom({ plugin: 'dashboard', key: 'agentsSeenBefore' } as const, 0)
@@ -239,6 +254,9 @@ let coldMinute: Timer | null = null
 // Fires when a pending gate on the band expires or a limit countdown turns a minute: neither keeps the ticker going.
 let bandWake: Timer | null = null
 let bandWakeAt: number | null = null
+// Fires when the overview next changes with time alone (nextOverviewChange): it reads no tick, its times moving by themselves.
+let overviewWake: Timer | null = null
+let overviewWakeAt: number | null = null
 // When the person last typed or sent a prompt in this session; undefined before the first.
 let inputAt: number | undefined
 // What `$.ui.status` was last set to.
@@ -261,7 +279,7 @@ export function toggleDisclosure($: EngineInterface, key: string): void {
   } else {
     openDisclosures.add(key)
   }
-  void update($, tick, was => was + 1)
+  void update($, paneWake, was => was + 1)
 }
 
 // Lives here, not in i18n.ts: validate only follows $ into functions declared in the same file.
@@ -370,6 +388,24 @@ function armBandWake($: EngineInterface, at: number | null, now: number): void {
       bandWake = null
       bandWakeAt = null
       void redraw($)
+    })
+  }
+}
+
+function armOverviewWake($: EngineInterface, at: number | null, now: number): void {
+  if (at === overviewWakeAt) {
+    return
+  }
+
+  overviewWake?.cancel()
+  overviewWake = null
+  overviewWakeAt = at
+
+  if (at !== null) {
+    overviewWake = $.clock.after(Math.max(0, at - now), () => {
+      overviewWake = null
+      overviewWakeAt = null
+      void update($, paneWake, was => was + 1)
     })
   }
 }
@@ -1329,9 +1365,13 @@ async function isPaneOnScreen($: EngineInterface): Promise<boolean> {
 
 /** The GPU page drawn again with its watch and no ssh, as after it hid behind another tab: connects again. */
 async function resumeGpu($: EngineInterface): Promise<void> {
+  if ((await read($, page)) !== 'gpu') {
+    return
+  }
+
   const watch = await read($, gpu)
 
-  if (gpuLink === null && watch !== null && (await read($, page)) === 'gpu' && (await isPaneOnScreen($))) {
+  if (gpuLink === null && watch !== null && (await isPaneOnScreen($))) {
     startGpu($, watch.host)
   }
 }
@@ -1458,6 +1498,20 @@ async function tabsWithData($: EngineInterface): Promise<Set<DashPage>> {
 /** The workbench's tabs: the on-demand ones with data at the last check, and `current` whatever it is. */
 const pagesShown = (current: DashPage) => pages().filter(one => !ON_DEMAND.includes(one.page) || one.page === current || shownTabs?.has(one.page) === true)
 
+/** The tightest rate-limit window with when it resets; with none, the cost; with neither, null. */
+function limitOrCost({ rateLimits, cost }: DashUsage, now: number): string | null {
+  const tightest = [...rateLimits].sort((a, b) => b.percentUsed - a.percentUsed)[0]
+
+  return tightest !== undefined ? limitText(tightest, now) : cost !== null ? `$${cost.usd.toFixed(2)}` : null
+}
+
+/** The progress canvas's url from ~/.claude/progress/canvas.json; null when there is none or it is not https. */
+async function canvasUrl($: EngineInterface): Promise<string | null> {
+  const url: unknown = await $.fs.read(canvasPath((await $.env.get('HOME')) ?? '')).then(text => JSON.parse(text).url, () => null).catch(() => null)
+
+  return typeof url === 'string' && url.startsWith('https://') ? url : null
+}
+
 /** Opens the workbench on `to`; visiting Agents or Reviews marks what has ended there as read. */
 async function goTo($: EngineInterface, to: DashPage): Promise<void> {
   const now = await $.clock.now()
@@ -1572,9 +1626,98 @@ async function readEvents($: EngineInterface, dir: string): Promise<Record<strin
 async function collectProgress($: EngineInterface): Promise<void> {
   const place = await boardPlace($)
   const dir = place.storage === null ? null : eventsDir(place.storage, place.home, place.project, place.root)
-  const nodes = dir === null ? [] : foldBoard(Object.values(await readEvents($, dir)).flat())
+  const events = dir === null ? [] : Object.values(await readEvents($, dir)).flat()
+  const requests = foldRequests(events, await $.clock.now())
+  const name = (await ledgerRoot($)).split('/').pop() ?? place.project
+  const current = currentRequest(events, requests, await $.session.id())
 
-  await update($, progress, () => ({ storage: place.storage, dir, nodes }))
+  await update($, progress, () => ({ storage: place.storage, dir, name, nodes: foldBoard(events), requests, lines: foldLines(events), current }))
+}
+
+/** The newest request stored open that has a request event or a piece event of `session`; null when none has. */
+function currentRequest(events: readonly BoardEvent[], requests: readonly BoardRequest[], session: string): string | null {
+  const own = events.filter(one => one.session === session)
+  const isOwn = (request: BoardRequest) =>
+    own.some(one => (one.type === 'request' && one.request === request.id) || ((one.type === 'add' || one.type === 'update') && request.pieces.includes(one.node)))
+
+  return requests.find(request => request.status === 'open' && isOwn(request))?.id ?? null
+}
+
+/** The progress page's 验收 / 放弃请求: one request event in this session's file, mirrored to the canvas, then the board read again. */
+async function closeRequest($: EngineInterface, id: string, fields: RequestFields): Promise<void> {
+  await onRecording(() => writeRequest($, id, fields))
+  await collectProgress($)
+}
+
+/** closeRequest's write, run on the recorder's chain. */
+async function writeRequest($: EngineInterface, id: string, fields: RequestFields): Promise<void> {
+  const place = await boardPlace($)
+
+  if (place.storage !== null) {
+    const dir = eventsDir(place.storage, place.home, place.project, place.root)
+    const files = await readEvents($, dir)
+    const before = Object.values(files).flat()
+    const now = await $.clock.now()
+
+    if (foldRequests(before, now).some(one => one.id === id)) {
+      const session = await $.session.id()
+      const event: BoardEvent = { type: 'request', request: id, at: now, session, commit: null, fields }
+      const own = parseBoardEvents(String(await $.fs.read(`${dir}/${session}.json`).catch(() => ''))) ?? files[`${session}.json`] ?? []
+
+      await $.fs.write(`${dir}/${session}.json`, JSON.stringify([...own, event]))
+      await mirrorEvents($, place, [event], [...before, event], now)
+    }
+  }
+}
+
+/** The page's own events mirrored to the canvas when it has a url, the board folded from `after`: batches in order, up to the first that fails. */
+async function mirrorEvents($: EngineInterface, place: { home: string; project: string }, events: readonly BoardEvent[], after: readonly BoardEvent[], now: number): Promise<void> {
+  const url: unknown = await $.fs.read(canvasPath(place.home)).then(text => JSON.parse(text).url, () => null).catch(() => null)
+
+  if (typeof url === 'string' && url !== '') {
+    const sync = { url, project: canvasProject(place.project), name: (await ledgerRoot($)).split('/').pop() ?? place.project, at: now, isBackfill: false }
+    const board = { nodes: foldBoard(after), requests: foldRequests(after, now), lines: foldLines(after) }
+
+    for (const writes of canvasBatches(canvasWrites(events, board, sync))) {
+      const r: { deny?: string; isError?: true } | undefined = await $.tool.call({ tool: 'ArtifactData', action: 'batch', url, writes } as never).catch(() => undefined)
+
+      if (r === undefined || r.deny !== undefined || r.isError === true) {
+        return
+      }
+    }
+  }
+}
+
+/**
+ * The progress page's Done / Drop: one update event in this session's file, mirrored to the canvas, then the board read again.
+ * Written here, not through /progress-close: a plugin's own $.command.run passes beneath its own command.run hooks.
+ */
+async function closeNode($: EngineInterface, id: string, status: 'done' | 'dropped'): Promise<void> {
+  await onRecording(() => writeClose($, id, status))
+  await collectProgress($)
+}
+
+/** closeNode's write, run on the recorder's chain; the node's request closed too when that was its one piece. */
+async function writeClose($: EngineInterface, id: string, status: 'done' | 'dropped'): Promise<void> {
+  const place = await boardPlace($)
+
+  if (place.storage !== null) {
+    const dir = eventsDir(place.storage, place.home, place.project, place.root)
+    const files = await readEvents($, dir)
+    const before = Object.values(files).flat()
+
+    if (foldBoard(before).some(one => one.id === id)) {
+      const session = await $.session.id()
+      const now = await $.clock.now()
+      const event: BoardEvent = { type: 'update', node: id, at: now, session, commit: null, fields: { status } }
+      const after = [...before, event]
+      const closing = closeEvents(foldRequests(after, now), foldBoard(after), NO_CHECKS, now, session, null)
+      const own = parseBoardEvents(String(await $.fs.read(`${dir}/${session}.json`).catch(() => ''))) ?? files[`${session}.json`] ?? []
+
+      await $.fs.write(`${dir}/${session}.json`, JSON.stringify([...own, event, ...closing]))
+      await mirrorEvents($, place, [event, ...closing], [...after, ...closing], now)
+    }
+  }
 }
 
 /** Ends the progress page's re-read. goTo ends it on leaving the page. */
@@ -1805,6 +1948,12 @@ export const register: Register = (on, options) => {
         }
       })
     }
+
+    await $.tool.register(OPEN_PROGRESS).catch((error: unknown) => {
+      if (isFirstTime(`register ${OPEN_PROGRESS.name}`)) {
+        $.ui.log(`dashboard: cannot register the ${OPEN_PROGRESS.name} tool: ${errorText(error)}`, { to: 'debug' })
+      }
+    })
 
     // Runs that ended before this session count as read.
     if ((await read($, seen)).runs === 0) {
@@ -2252,6 +2401,31 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('command.run', { command: 'progress' }, async $ => {
+    await goTo($, 'progress')
+
+    const url = await canvasUrl($)
+
+    return url === null ? {} : { text: `${t().progressCanvas}: ${url}` }
+  }).catch(($, e, next) => {
+    hookFailed($, 'command.run progress', next.error)
+
+    return next(e)
+  })
+
+  on('tool.call', { tool: OPEN_PROGRESS_TOOL }, async $ => {
+    await goTo($, 'progress')
+
+    const url = await canvasUrl($)
+    const text = url === null ? "Opened the workbench's Progress page for the person." : `Opened the workbench's Progress page for the person. The progress canvas: ${url}`
+
+    return { result: [{ type: 'text', text }] }
+  }).catch(($, e, next) => {
+    hookFailed($, 'tool.call open_progress', next.error)
+
+    return next(e)
+  })
+
   on('command.run', { command: 'gpu' }, async ($, e) => {
     return connectGpu($, e.args)
   }).catch(($, e, next) => {
@@ -2366,12 +2540,13 @@ export const register: Register = (on, options) => {
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
     await read($, tick)
 
-    const { context, rateLimits, cost } = await read($, measured)
-    const tightest = [...rateLimits].sort((a, b) => b.percentUsed - a.percentUsed)[0]
+    const usage = await read($, measured)
+    const { context } = usage
+    const limit = limitOrCost(usage, await $.clock.now())
     const parts = [
       t().context(context === null ? fmtTokens(null) : `${fmtTokens(context.tokens)}/${fmtTokens(context.window)}`),
       ...(context?.percent === undefined ? [] : [`${context.percent}%`]),
-      ...(tightest !== undefined ? [limitText(tightest, await $.clock.now())] : cost !== null ? [`$${cost.usd.toFixed(2)}`] : []),
+      ...(limit === null ? [] : [limit]),
     ]
     const note = parts.join(' · ')
 
@@ -2387,6 +2562,67 @@ export const register: Register = (on, options) => {
     return next({ ...e, props: { ...e.props, tail } })
   }).catch(($, e, next) => {
     hookFailed($, 'ui.render PromptHint', next.error)
+
+    return next(e)
+  })
+
+  // The desktop app requests SessionMode but never PromptHint, and shows only a tree the plugin draws: an engine node beneath draws nothing there.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (e.surface !== 'desktop') {
+      return next(e)
+    }
+
+    await read($, tick)
+
+    const { rateLimits, cost } = await read($, measured)
+    const now = await $.clock.now()
+    const order = (kind: string) => (kind === 'five_hour' ? 0 : kind === 'seven_day' ? 1 : 2)
+    const windows = [...rateLimits].sort((a, b) => order(a.kind) - order(b.kind))
+    const costText = windows.length === 0 && cost !== null ? [`$${cost.usd.toFixed(2)}`] : []
+    const label = [...e.props.modes, ...costText].join(' & ')
+    const { Box, Button, Svg, Text } = $.ui.resolve(e)
+
+    return (
+      <Box flexDirection="row" columnGap={1} alignItems="center">
+        {label === '' ? null : <Text color="subtle">{label}</Text>}
+        {windows.map(limit => {
+          const text = limitText(limit, now)
+          const color = limit.percentUsed < 70 ? FILL.done : limit.percentUsed < 90 ? FILL.stale : FILL.failed
+
+          return (
+            <Box key={`limit-${limit.kind}`} flexDirection="row" columnGap={1} alignItems="center">
+              <Svg source={horizontalGauge(limit.percentUsed / 100, color, false, 40, 12)} alt={text} width={40} height={12} />
+              <Text color="subtle">{text}</Text>
+            </Box>
+          )
+        })}
+        <Button key="mode-workbench" label={t().workbench} variant="secondary" onPress={() => void goTo($, 'overview')} />
+        <Button key="mode-progress" label={t().pageProgress} variant="secondary" onPress={() => void goTo($, 'progress')} />
+      </Box>
+    )
+  }).catch(($, e, next) => {
+    hookFailed($, 'ui.render SessionMode', next.error)
+
+    return next(e)
+  })
+
+  on('ui.render', { component: 'ToolResult', props: { tool: OPEN_PROGRESS_TOOL } }, async ($, e, next) => {
+    if (e.props.isErrored) return next(e)
+
+    const { Box, Button, Link, Text } = $.ui.resolve(e)
+    const url = await canvasUrl($)
+
+    // The terminal has no clickable button here: the line names the command instead.
+    return e.surface === 'desktop' ? (
+      <Box columnGap={1} flexWrap="wrap">
+        <Button key="open-progress" label={t().pageProgress} variant="secondary" onPress={() => void goTo($, 'progress')} />
+        {url === null ? null : <Link href={url} label={t().progressCanvas} />}
+      </Box>
+    ) : (
+      <Text color="subtle">{[`${t().pageProgress} · /progress`, ...(url === null ? [] : [`${t().progressCanvas}: ${url}`])].join(' · ')}</Text>
+    )
+  }).catch(($, e, next) => {
+    hookFailed($, 'ui.render ToolResult open_progress', next.error)
 
     return next(e)
   })
@@ -2410,48 +2646,61 @@ export const register: Register = (on, options) => {
   // Workbench pane
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
-    await read($, tick)
     await resumeGpu($)
     // A pane drawn before any opening this load, as after a reload, checks once here.
     shownTabs ??= await tabsWithData($).catch(() => null)
 
     if (e.surface === 'desktop') {
       const current = (await read($, page)) ?? 'overview'
+      const open = await read($, detail)
+      // Each read subscribes this drawing to the value: a page reads only what it draws, so a write elsewhere does not redraw it.
+      const isOn = (...shown: DashPage[]) => shown.includes(current)
 
-      return drawDesktopPane($.ui.resolve(e), {
+      await read($, paneWake)
+
+      if (isOn('agents', 'mmrun', 'timeline', 'progress')) {
+        await read($, tick)
+      }
+
+      const now = await $.clock.now()
+
+      const data: PaneData = {
         page: current,
         pages: pagesShown(current),
-        now: await $.clock.now(),
+        now,
         columns: e.props.bodyColumns,
-        agents: await read($, agents),
-        snap: await read($, runs),
-        seen: await read($, seen),
-        gpu: await read($, gpu),
+        agents: isOn('overview', 'agents', 'timeline') ? await read($, agents) : [],
+        snap: isOn('overview', 'mmrun') ? await read($, runs) : null,
+        seen: isOn('overview', 'agents') ? await read($, seen) : { agents: 0, runs: 0 },
+        gpu: isOn('gpu') ? await read($, gpu) : null,
         gpuHosts: autoHosts,
         onConnectGpu: host => void connectGpu($, host),
         onChangeGpuHost: () => void forgetGpu($),
         disclosures: openDisclosures,
         onToggleDisclosure: key => toggleDisclosure($, key),
-        gates: await read($, gates),
-        trees: await read($, trees),
-        guards: (await read($, guards))?.blocks ?? [],
-        peers: (await read($, peers)) ?? [],
+        gates: isOn('overview') ? await read($, gates) : [],
+        trees: isOn('overview') ? await read($, trees) : null,
+        guards: isOn('overview') ? ((await read($, guards))?.blocks ?? []) : [],
+        peers: isOn('overview') ? ((await read($, peers)) ?? []) : [],
         paneRuns: PANE_RUNS,
-        detail: await read($, detail),
-        reports: await read($, reports),
-        timeline: await read($, timeline),
-        timelineTurnId: (await read($, timelineTurn)) ?? undefined,
-        flights: await flightsNow($),
-        agentsSeenBefore: await read($, agentsSeenBefore),
-        isFoldOpen: await read($, agentsFoldOpen),
-        peek: await read($, peek),
-        usage: await usageNow($),
-        progress: await read($, progress),
+        detail: open,
+        reports: open?.page === 'mmrun' && isOn('mmrun') ? await read($, reports) : {},
+        timeline: isOn('timeline') ? await read($, timeline) : [],
+        timelineTurnId: isOn('timeline') ? ((await read($, timelineTurn)) ?? undefined) : undefined,
+        flights: isOn('overview', 'agents') ? await flightsNow($) : new Map(),
+        agentsSeenBefore: isOn('agents') ? await read($, agentsSeenBefore) : 0,
+        isFoldOpen: isOn('agents') ? await read($, agentsFoldOpen) : false,
+        peek: open?.page === 'agents' && isOn('agents') ? await read($, peek) : null,
+        ...(isOn('usage') && { usage: await usageNow($) }),
+        progress: isOn('progress') ? await read($, progress) : null,
+        onCloseNode: (id, status) => void closeNode($, id, status),
+        onAcceptRequest: id => void closeRequest($, id, { status: 'closed', resolution: { by: 'person', evidence: 'accepted on the progress page' } }),
+        onDropRequest: id => void closeRequest($, id, { status: 'dropped' }),
         onToggleFold: () => void update($, agentsFoldOpen, was => !was),
         onTimelineTurn: turnId => void pickTurn($, turnId ?? null),
-        timelineView: await read($, timelineView),
+        timelineView: isOn('timeline') ? await read($, timelineView) : undefined,
         onTimelineView: () => void update($, timelineView, was => (was === 'hotspots' ? 'turn' : 'hotspots')),
-        timelinePage: (await read($, timelinePage)) ?? undefined,
+        timelinePage: isOn('timeline') ? ((await read($, timelinePage)) ?? undefined) : undefined,
         onTimelinePage: to => void update($, timelinePage, () => to),
         onPage: to => void goTo($, to),
         onReadAgent: agentId => void readAgent($, agentId),
@@ -2469,9 +2718,14 @@ export const register: Register = (on, options) => {
             await $.ui.close({ id: PANE_ID })
             await syncStatus($)
           })(),
-      })
+      }
+
+      armOverviewWake($, isOn('overview') ? nextOverviewChange(data.agents, data.gates, data.peers, now, data.trees, data.flights ?? new Map()) : null, now)
+
+      return drawDesktopPane($.ui.resolve(e), data)
     }
 
+    await read($, tick)
     const { Box, Button, Markdown, Text } = $.ui.resolve(e)
     const current = (await read($, page)) ?? 'overview'
     const now = await $.clock.now()
@@ -2758,7 +3012,7 @@ export const register: Register = (on, options) => {
     } else if (current === 'usage') {
       body = usageLines(await usageNow($), columns).map(draw)
     } else if (current === 'progress') {
-      body = progressLines(await read($, progress), columns).map(draw)
+      body = progressLines(await read($, progress), columns, now).map(draw)
     } else {
       body = gpuLines(await read($, gpu), now, columns).map(line => plain(line.text, line))
     }
@@ -2782,7 +3036,6 @@ export const register: Register = (on, options) => {
         page: current,
         pages: pagesShown(current),
         message,
-        columns: e.props.bodyColumns,
         onPage: to => void goTo($, to),
         onClose: () =>
           void (async () => {

@@ -32,7 +32,7 @@ const path = require("path");
 const fs = require("fs");
 const { parseCliArgs, buildReport, hasFatal, DASH } = require(path.join(__dirname, 'shared.js'));
 
-const CODE_EXT = new Set([".py",".go",".rs",".ts",".js",".jsx",".tsx",".java",".c",".cpp",".h",".hpp"]);
+const CODE_EXT = new Set([".py",".go",".rs",".ts",".js",".jsx",".tsx",".java",".c",".cpp",".h",".hpp",".swift"]);
 const DOC_EXT = new Set([".md",".rst",".txt",".adoc"]);
 const TEST_PATTERNS = ["test_","_test.",".test.","spec_","_spec.","/tests/","/test/","/__tests__/"];
 const CONFIG_FILES = new Set(["package.json","pyproject.toml","go.mod","cargo.toml","pom.xml","makefile","dockerfile"]);
@@ -92,15 +92,9 @@ function git(...args) {
   catch { return ""; }
 }
 
-function getGitChanges(base = "HEAD~1", target = "HEAD") {
-  const changes = [];
-  for (const line of git('diff', '--name-status', base, target).split("\n")) {
-    if (!line) continue;
-    const c = parseNameStatusLine(line);
-    if (c) changes.push(c);
-  }
+function getNumstat(...diffArgs) {
   const statMap = {};
-  for (const line of git('diff', '--numstat', base, target).split("\n")) {
+  for (const line of git('diff', '--numstat', ...diffArgs).split("\n")) {
     if (!line) continue;
     const parts = line.split("\t");
     if (parts.length >= 3) {
@@ -110,10 +104,24 @@ function getGitChanges(base = "HEAD~1", target = "HEAD") {
       ];
     }
   }
+  return statMap;
+}
+
+function applyNumstat(changes, statMap) {
   for (const c of changes) {
     if (statMap[c.path]) { [c.additions, c.deletions] = statMap[c.path]; }
   }
   return changes;
+}
+
+function getGitChanges(base = "HEAD~1", target = "HEAD") {
+  const changes = [];
+  for (const line of git('diff', '--name-status', base, target).split("\n")) {
+    if (!line) continue;
+    const c = parseNameStatusLine(line);
+    if (c) changes.push(c);
+  }
+  return applyNumstat(changes, getNumstat(base, target));
 }
 
 function getStagedChanges() {
@@ -123,17 +131,26 @@ function getStagedChanges() {
     const c = parseNameStatusLine(line);
     if (c) changes.push(c);
   }
-  return changes;
+  return applyNumstat(changes, getNumstat('--cached'));
 }
 
 function getWorkingChanges() {
   const changes = [];
-  for (const line of git('status', '--porcelain').split("\n")) {
+  const statMap = getNumstat('HEAD');
+  // porcelain paths are relative to the repo root, not to the cwd
+  const root = git('rev-parse', '--show-toplevel').trim();
+  // -uall lists files inside untracked directories; git diff has no numstat for untracked files.
+  for (const line of git('status', '--porcelain', '-uall').split("\n")) {
     if (!line) continue;
     const c = parsePorcelainLine(line);
-    if (c) changes.push(c);
+    if (!c) continue;
+    if (line.startsWith("??")) {
+      const text = fs.readFileSync(path.join(root, c.path), "utf8");
+      statMap[c.path] = [text ? text.split("\n").length - (text.endsWith("\n") ? 1 : 0) : 0, 0];
+    }
+    changes.push(c);
   }
-  return changes;
+  return applyNumstat(changes, statMap);
 }
 
 function isPathInModule(filePath, mod) {

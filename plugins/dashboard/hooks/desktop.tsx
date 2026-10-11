@@ -1,12 +1,13 @@
 import type { ElementTable, RenderChildren, RenderSurface } from 'claude-code'
 
-import type { AgentPeek, AgentRun, BoardRead, DashDetail, DashPage, DashReport, DashSeen, DashTimelinePage, DashTimelineView, GateRun, GpuWatch, GuardBlock, MmModel, MmSnapshot, SessionPresence, TimelineTurn, UsageCounts, WorktreeInfo } from '../types'
-import { elapsedOf, fit, fmtDuration, fmtTokens, glyphOf, widthOf } from './agent-model'
+import type { AgentPeek, AgentRun, BoardNode, BoardRead, BoardRequest, DashDetail, DashPage, DashReport, DashSeen, DashTimelinePage, DashTimelineView, GateRun, GpuWatch, GuardBlock, MmModel, MmSnapshot, SessionPresence, TimelineTurn, UsageCounts, WorktreeInfo } from '../types'
+import { elapsedOf, fit, fmtAge, fmtDuration, fmtTokens, glyphOf, widthOf } from './agent-model'
 import {
   agentFold,
   askLines,
+  clockOf,
   commandHead,
-  endedText,
+  endedHead,
   fitLine,
   flightText,
   foldText,
@@ -16,32 +17,45 @@ import {
   isStalled,
   itemTail,
   itemTitle,
+  legacyNodes,
   overviewOf,
   PEER_WORDS,
   peerTitle,
-  PROGRESS_COLORS,
+  PIECE_GLYPHS,
+  progressAge,
+  progressColor,
+  progressDoneWhen,
   progressGroups,
   progressMeta,
   recentGates,
+  requestGlyph,
+  requestPieces,
+  rollupText,
+  staleHours,
   tokensText,
   usageText,
 } from './board'
-import type { Line, OverviewItem, Seg, ShownPeer } from './board'
+import type { Line, Live, OverviewItem, Seg, ShownPeer } from './board'
 import { BAR, BAR_SIZES, elapsedBar, GAUGE, horizontalGauge, MEMORY, scaleOf, TONE_KEYS, FILL } from './desktop-svg'
 import type { Tone } from './desktop-svg'
 import { t } from './i18n'
+import { titlePattern } from './progress'
 import { capLeaf, elapsedSecs, fmtRunTokens, fmtSecs, listOf, runLabel, SEVERITIES } from './runs'
 import type { Flight } from './timeline'
 import { drawHotspotsDesktop, drawTimelineDesktop, latestMainTurnId } from './timeline-view'
 import { isEmptyWeek } from './usage'
 import type { UsageWeek } from './usage'
-import { GUARD_COLORS, guardText, treeMarks } from './workspace'
+import { GUARD_COLORS, guardHead, treeMarks } from './workspace'
 import type { Mark } from './workspace'
 
 type El = ElementTable<'desktop'>
 
-// Estimate of pixels per column on desktop; to be checked on the real app.
-export const PIXELS_PER_COLUMN = 8
+// Measured on the desktop app: a pane of 54 bodyColumns is about 515px wide, and one gap or padding unit is about 10px.
+export const PIXELS_PER_COLUMN = 9.5
+// Text cells (widthOf) that fit in one column: the desktop draws an ASCII cell about 7–8px wide, a CJK character two of them.
+const TEXT_CELLS_PER_COLUMN = 1.25
+/** The text cells, as fit counts them, that `columns` layout columns hold. */
+export const textCells = (columns: number) => Math.floor(columns * TEXT_CELLS_PER_COLUMN)
 export const TIER_NARROW_MAX_PX = 439
 export const TIER_STANDARD_MIN_PX = 440
 export const TIER_WIDE_MIN_PX = 760
@@ -110,6 +124,12 @@ export type PaneData = {
   usage?: UsageWeek
   /** The progress board as last read; absent or null, not read yet. */
   progress?: BoardRead | null
+  /** Closes a progress node (done or dropped) and reads the board again. */
+  onCloseNode?: (id: string, status: 'done' | 'dropped') => void
+  /** Closes a request as accepted by the person and reads the board again. */
+  onAcceptRequest?: (id: string) => void
+  /** Drops a request, its pieces left as they are, and reads the board again. */
+  onDropRequest?: (id: string) => void
   onPage: (to: DashPage) => void
   onReadAgent: (agentId: string) => void
   onReadRun: (runid: string) => void
@@ -151,7 +171,8 @@ export function modelTone(model: Pick<MmModel, 'status'>): Tone {
     return 'running'
   }
 
-  return model.status === 'DONE' ? 'done' : model.status === 'STALE' ? 'stale' : 'failed'
+  // As modelStatusOf words it: only FAIL is an error; CANCELLED, SKIP and STALE are warnings.
+  return model.status === 'DONE' ? 'done' : model.status.startsWith('FAIL') ? 'failed' : 'stale'
 }
 
 export const MODEL_GLYPHS: Record<Tone, string> = { running: '●', done: '✓', failed: '✗', stale: '~' }
@@ -237,9 +258,8 @@ export function drawDesktopBand(el: El, lines: readonly Line[], onOpen: () => vo
   )
 }
 
-function tabs(el: El, data: Pick<PaneData, 'page' | 'pages' | 'onPage' | 'columns'>) {
+function tabs(el: El, data: Pick<PaneData, 'page' | 'pages' | 'onPage'>) {
   const { Box, Button } = el
-  const isNarrow = widthTierOf(data.columns) === 'narrow'
   const buttonOf = (one: { page: DashPage; label: string }) => (
     <Button
       key={`page-${one.page}`}
@@ -249,24 +269,8 @@ function tabs(el: El, data: Pick<PaneData, 'page' | 'pages' | 'onPage' | 'column
     />
   )
 
-  if (isNarrow) {
-    const row1 = data.pages.slice(0, 3).map(buttonOf)
-    const row2 = data.pages.slice(3).map(buttonOf)
-
-    return (
-      <Box flexDirection="column" rowGap={1}>
-        <Box flexDirection="row" columnGap={1}>
-          {row1}
-        </Box>
-        <Box flexDirection="row" columnGap={1}>
-          {row2}
-        </Box>
-      </Box>
-    )
-  }
-
   return (
-    <Box flexDirection="row" columnGap={1}>
+    <Box flexDirection="row" columnGap={1} rowGap={1} flexWrap="wrap">
       {data.pages.map(buttonOf)}
     </Box>
   )
@@ -281,70 +285,128 @@ const FRAME_CELLS = 4
 const SECTION_CAP = 3
 /** Characters of a command a disclosure's Code shows. */
 const COMMAND_CHARS = 8000
+// The progress page: cells a request card keeps for its age (`30d!`); closed requests a section lists; requests that make a series.
+const AGE_CELLS = 4
+const LISTED_CLOSED = 3
+const CHAIN_MIN = 3
+// The version in a title, as titlePattern folds it to `<ver>`.
+const VERSION = /\bv?\d+(?:\.\d+)+/i
+const DAY_MS = 86_400_000
 
-/** `45s`, `27m`, `2h05m`, `3d`: an overview age, the seconds dropped past a minute. */
-function fmtAge(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000))
+/** `time` as `template` words it, the time a Live segment keyed `key`. */
+function liveSegs(template: (time: string) => string, key: string, from: number, now: number, format: Live['format']): Line {
+  const [before = '', after = ''] = template('\u0000').split('\u0000')
+  const time: Seg = { text: (format === 'age' ? fmtAge : fmtDuration)(now - from), live: { key, from, now, format } }
 
-  if (s < 60) {
-    return `${s}s`
-  }
-
-  if (s < 3600) {
-    return `${Math.floor(s / 60)}m`
-  }
-
-  return s < 86_400 ? `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m` : `${Math.floor(s / 86_400)}d`
+  return [...(before === '' ? [] : [{ text: before }]), time, ...(after === '' ? [] : [{ text: after }])]
 }
 
-const ageText = (ms: number) => t().gateAgo(fmtAge(ms))
+const isPlain = (seg: Seg) => seg.color === undefined && seg.bold !== true && seg.dim !== true && seg.live === undefined
+
+/** The parts with ` · ` between them, neighboring plain segments as one. */
+function joinParts(parts: readonly Line[]): Line {
+  const out: Seg[] = []
+
+  for (const seg of parts.flatMap((part, index) => (index === 0 ? part : [{ text: ' · ' }, ...part]))) {
+    const last = out.at(-1)
+
+    if (last !== undefined && isPlain(last) && isPlain(seg)) {
+      out[out.length - 1] = { text: last.text + seg.text }
+    } else {
+      out.push(seg)
+    }
+  }
+
+  return out
+}
+
+const itemKey = (item: OverviewItem) => (item.kind === 'agent' ? item.run.agentId : `${item.run.runid}/${item.model.name}`)
 
 const chipSeg = (tone: Tone, text: string): Seg => ({ text: ` ${text} `, color: TONE_KEYS[tone], bold: true })
 
 const segsWidth = (line: Line) => widthOf(line.map(seg => seg.text).join(''))
 
-function itemChip(item: OverviewItem, now: number, flights: ReadonlyMap<string, Flight> | undefined): Seg {
+function itemChip(item: OverviewItem, now: number, flights: ReadonlyMap<string, Flight> | undefined): Line {
   if (item.kind === 'model') {
-    return chipSeg(modelTone(item.model), modelWord(item.model))
+    return [chipSeg(modelTone(item.model), modelWord(item.model))]
   }
 
   return isStalled(item.run, now, flights?.get(item.run.agentId))
-    ? chipSeg('stale', `◐ ${t().quiet(fmtDuration(now - item.run.lastActivityAt))}`)
-    : chipSeg(agentTone(item.run), agentWord(item.run))
+    ? liveSegs(time => ` ◐ ${t().quiet(time)} `, `quiet-${item.run.agentId}`, item.run.lastActivityAt, now, 'duration').map(seg => ({ ...seg, color: TONE_KEYS.stale, bold: true }))
+    : [chipSeg(agentTone(item.run), agentWord(item.run))]
 }
 
-/** `4 tools · 3m12s`, or a model's tokens and time; then how long ago it ended. */
-function itemMeta(item: OverviewItem, now: number, polledAt: number): string {
+/** `4 tools · 3m12s`, or a model's tokens and time; then how long ago it ended. A running agent's time and every age move by themselves. */
+function itemMeta(item: OverviewItem, now: number, polledAt: number): Line {
   const endedAt = item.kind === 'agent' ? item.run.endedAt : item.model.endedAt
-  const parts = itemTail(item, now, polledAt).split('  ')
+  const parts = itemTail(item, now, polledAt)
+    .split('  ')
+    .filter(part => part !== '')
+    .map((text): Line => [{ text }])
 
-  return [...parts, endedAt === undefined ? '' : ageText(now - endedAt)].filter(part => part !== '').join(' · ')
+  if (item.kind === 'agent' && item.run.durationMs === undefined) {
+    // While it runs, elapsedOf(run, now) is now - from.
+    const from = (item.run.turnAt ?? item.run.startedAt) - (item.run.activeMs ?? 0)
+
+    parts[parts.length - 1] = [{ text: fmtDuration(elapsedOf(item.run, now)), live: { key: `elapsed-${item.run.agentId}`, from, now, format: 'duration' } }]
+  }
+
+  return joinParts([...parts, ...(endedAt === undefined ? [] : [liveSegs(t().gateAgo, `ended-${itemKey(item)}`, endedAt, now, 'age')])])
 }
 
 /** `agent-x · 2 fail · 3m ago`, `main · 24 pass · 1h05m ago`; a stale run says stale before its age. */
-function gateMeta(gate: GateRun, now: number): string {
+function gateMeta(gate: GateRun, key: string, now: number): Line {
   const outcome = isFailedGate(gate) ? gateOutcome(gate) : `${gate.unit === 'packages' ? `${t().packagesUnit} · ` : ''}${t().passCount(gate.pass ?? '—')}`
+  const words = [gate.where === 'main' ? t().mainTree : gate.where, outcome, ...(gate.stale === true ? [t().gateStale] : [])]
 
-  return [gate.where === 'main' ? t().mainTree : gate.where, outcome, ...(gate.stale === true ? [t().gateStale] : []), ageText(now - gate.at)].join(' · ')
+  return joinParts([...words.map((text): Line => [{ text }]), liveSegs(t().gateAgo, key, gate.at, now, 'age')])
 }
 
 /** A worktree mark inside the subtle metadata line: `plain` at full strength, `dim` left subtle, the rest a chip's color. */
 const markSeg = (mark: Mark): Seg =>
   mark.tone === 'plain' ? { text: mark.text, color: 'text' } : mark.tone === 'dim' ? { text: mark.text } : { text: mark.text, color: TONE_KEYS[mark.tone], bold: true }
 
-/** One Text of segments; the desktop ignores truncation in practice, so callers cut the line first. */
+/** One Text of segments, each Live one a clock-client Client between Texts; the desktop ignores truncation in practice, so callers cut the line first. */
 function lineText(el: El, line: Line, color?: string) {
-  const { Text } = el
-
-  return (
+  const { Box, Client, Text } = el
+  const textOf = (segs: Line) => (
     <Text wrap="truncate-end" {...(color !== undefined && { color })}>
-      {line.map(seg => (
+      {segs.map(seg => (
         <Text {...(seg.color !== undefined && { color: seg.color })} {...(seg.bold === true && { bold: true })}>
           {seg.text}
         </Text>
       ))}
     </Text>
   )
+
+  if (!line.some(seg => seg.live !== undefined)) {
+    return textOf(line)
+  }
+
+  const parts: RenderChildren[] = []
+  let plain: Seg[] = []
+
+  for (const seg of line) {
+    if (seg.live === undefined) {
+      plain.push(seg)
+      continue
+    }
+
+    if (plain.length > 0) {
+      parts.push(textOf(plain))
+      plain = []
+    }
+
+    const { key, from, now, format } = seg.live
+
+    parts.push(<Client key={key} module="./clock-client.tsx" props={{ from, now, format, color: seg.color ?? color ?? 'text', bold: seg.bold === true }} />)
+  }
+
+  if (plain.length > 0) {
+    parts.push(textOf(plain))
+  }
+
+  return <Box flexDirection="row">{parts}</Box>
 }
 
 /** An overview item: its status before the title and chips after it, its metadata, the Button right of the title and what the Button shows. */
@@ -423,7 +485,7 @@ function overview(el: El, data: PaneData) {
   const polledAt = data.snap?.polledAt ?? now
   const view = overviewOf(data.agents, data.snap, data.seen, now, data.peers, data.gates, data.trees)
   const tier = widthTierOf(data.columns)
-  const width = data.columns - FRAME_CELLS
+  const width = textCells(data.columns - FRAME_CELLS)
 
   const done = [
     view.returned > 0 ? t().returnedCount(view.returned) : '',
@@ -445,17 +507,17 @@ function overview(el: El, data: PaneData) {
   }
 
   const workItem = (item: OverviewItem, label: string): Item => ({
-    status: [itemChip(item, now, data.flights)],
+    status: itemChip(item, now, data.flights),
     title: itemTitle(item),
     after: item.kind === 'agent' && (item.run.denied ?? 0) > 0 ? [{ text: ' ' }, chipSeg('failed', t().denied(item.run.denied ?? 0))] : [],
-    meta: [{ text: itemMeta(item, now, polledAt) }],
+    meta: itemMeta(item, now, polledAt),
     button: <Button label={label} variant="secondary" onPress={() => data.onOpenItem(item)} />,
   })
 
-  const gateItem = (gate: GateRun, section: string, status: Seg): Item => ({
+  const gateItem = (gate: GateRun, section: string, index: number, status: Seg): Item => ({
     status: [status],
     title: commandHead(gate.key ?? gate.command),
-    meta: [{ text: gateMeta(gate, now) }],
+    meta: gateMeta(gate, `gate-${section}-${index}`, now),
     ...disclosure(el, data, `gate:${section}:${gate.where}:${gate.at}`, `gate-${section}-${gate.where}-${gate.at}`, gate.key ?? gate.command),
   })
 
@@ -478,7 +540,7 @@ function overview(el: El, data: PaneData) {
           headerOf(el, t().needsYou, needsYou, view.gates.length === 0 ? allLink(view.pending) : null),
           ...capped(el, data, 'needsYou', [
             ...view.pending.map(item => itemOf(el, width, workItem(item, item.kind === 'agent' && item.run.state === 'running' ? t().open : t().read))),
-            ...view.gates.map(gate => itemOf(el, width, gateItem(gate, 'pending', chipSeg('failed', `✗ ${t().gateWord}`)))),
+            ...view.gates.map((gate, index) => itemOf(el, width, gateItem(gate, 'pending', index, chipSeg('failed', `✗ ${t().gateWord}`)))),
           ]),
         ]
 
@@ -495,7 +557,7 @@ function overview(el: El, data: PaneData) {
               itemOf(el, width, {
                 status: [chipSeg(PEER_TONES[peer.state], `${PEER_WORDS[peer.state].glyph} ${t().peerWords[peer.state]}`)],
                 title: peerTitle(peer),
-                meta: [{ text: ageText(now - peer.since) }],
+                meta: liveSegs(t().gateAgo, `peer-${peer.id}`, peer.since, now, 'age'),
                 ...disclosure(el, data, `peer:${peer.id}`, `copy-resume-${peer.id}`, `claude --resume ${posixQuote(peer.id)}`),
               }),
             ),
@@ -524,17 +586,15 @@ function overview(el: El, data: PaneData) {
         <Text color="subtle" wrap="truncate-end">
           {fit(t().nothingPending, width - EDGE_CELLS)}
         </Text>,
-        ...view.recent.map(item => (
-          <Text color="subtle" wrap="truncate-end">
-            {fit(endedText(item, now), width - EDGE_CELLS)}
-          </Text>
-        )),
+        ...view.recent.map(item =>
+          lineText(el, fitLine([{ text: `${endedHead(item)} · ` }, ...liveSegs(t().ago, `idle-${itemKey(item)}`, (item.kind === 'agent' ? item.run.endedAt : item.model.endedAt) ?? now, now, 'duration')], width - EDGE_CELLS), 'subtle'),
+        ),
       ]
     : []
 
   const isSideBySide = tier === 'wide'
-  // Side by side, each column takes half the row past its gap.
-  const columnWidth = isSideBySide ? Math.floor((width - 3) / 2) : width
+  // Side by side, each column takes half the row past its gap, and frames itself.
+  const columnWidth = isSideBySide ? textCells(Math.floor((data.columns - 3) / 2) - FRAME_CELLS) : width
 
   const gatesSection =
     gates.length === 0
@@ -545,11 +605,11 @@ function overview(el: El, data: PaneData) {
             el,
             data,
             'gates',
-            gates.map(gate => {
+            gates.map((gate, index) => {
               const word = isFailedGate(gate) ? t().gateFailedChip : t().gatePassed
               const status: Seg = gate.stale === true ? { text: ` ${word} `, color: 'inactive', bold: true } : chipSeg(isFailedGate(gate) ? 'failed' : 'done', word)
 
-              return itemOf(el, columnWidth, gateItem(gate, 'recent', status))
+              return itemOf(el, columnWidth, gateItem(gate, 'recent', index, status))
             }),
           ),
         ]
@@ -586,11 +646,9 @@ function overview(el: El, data: PaneData) {
             el,
             data,
             'guards',
-            data.guards.map(block => (
-              <Text wrap="truncate-end" color={GUARD_COLORS[block.decision]}>
-                {fit(guardText(block, now), width - EDGE_CELLS)}
-              </Text>
-            )),
+            data.guards.map((block, index) =>
+              lineText(el, fitLine([{ text: `${guardHead(block)} · ` }, ...liveSegs(t().gateAgo, `guard-${index}-${block.at}`, block.at, now, 'duration')], width - EDGE_CELLS), GUARD_COLORS[block.decision]),
+            ),
           ),
         ]
 
@@ -838,17 +896,17 @@ function usageBody(el: El, data: PaneData) {
   const week = data.usage
 
   if (week === undefined || isEmptyWeek(week)) {
-    return [<Text color="subtle" wrap="truncate-end">{fit(t().usageEmpty, data.columns - EDGE_CELLS)}</Text>]
+    return [<Text color="subtle" wrap="truncate-end">{fit(t().usageEmpty, textCells(data.columns - EDGE_CELLS))}</Text>]
   }
 
   const width = data.columns - FRAME_CELLS - EDGE_CELLS
-  const px = Math.min(GAUGE.standard.width, Math.max(0, width * PIXELS_PER_COLUMN))
+  const px = Math.min(GAUGE.standard.width, Math.max(0, Math.floor(width * PIXELS_PER_COLUMN)))
   const top = Math.max(0, ...week.days.map(one => one.equivalent))
   const scale = `0—${fmtTokens(top)}`
   const total = week.threads.reduce((sum, one) => sum + one.equivalent, 0)
   const line = (text: string, color: 'text' | 'subtle') => (
     <Text color={color} wrap="truncate-end">
-      {fit(text, width)}
+      {fit(text, textCells(width))}
     </Text>
   )
   const note = (text: string) => (
@@ -918,32 +976,167 @@ function usageBody(el: El, data: PaneData) {
   ]
 }
 
-/** The progress board: a frame per status group in order, three nodes each before `N more`; a node its status chip and title, then its metadata. */
+/**
+ * The progress board: a 现在 frame with this session's request, every ready one and every stale one; a section per active line with a
+ * request on the page, newest activity first, then one for requests of no line; last the nodes recorded before requests, a frame per
+ * status group as before, three nodes each before `N more`.
+ */
 function progressBody(el: El, data: PaneData) {
-  const { Box, Text } = el
-  const nodes = data.progress?.nodes ?? []
+  const { Box, Button, Text } = el
+  const board = data.progress ?? null
+  const nodes = board?.nodes ?? []
+  const requests = (board?.requests ?? []).filter(one => one.state !== 'dropped').sort((a, b) => b.updatedAt - a.updatedAt)
 
-  if (nodes.length === 0) {
+  if (nodes.length === 0 && requests.length === 0) {
     return [<Text color="subtle" wrap="wrap">{t().progressEmpty(data.progress?.dir ?? null)}</Text>]
   }
 
-  const width = data.columns - FRAME_CELLS - EDGE_CELLS
+  const now = data.now
+  const width = textCells(data.columns - FRAME_CELLS - EDGE_CELLS)
+  // A line, then its Buttons on the right; the line cut to leave each Button its cells.
+  const withButtons = (line: Line, buttons: RenderChildren[], room = width) =>
+    buttons.length === 0 ? (
+      lineText(el, fitLine(line, room))
+    ) : (
+      <Box flexDirection="row" columnGap={1} alignItems="center">
+        <Box flexGrow={1} flexShrink={1} minWidth={0}>
+          {lineText(el, fitLine(line, room - buttons.length * BUTTON_CELLS))}
+        </Box>
+        {buttons}
+      </Box>
+    )
+  const button = (key: string, label: string, onPress: () => void) => <Button key={key} label={label} variant="secondary" onPress={onPress} />
+  const ageLine = (one: BoardRequest): Line => [{ text: progressAge(now - one.updatedAt) }, ...(one.state === 'stale' ? [{ text: '!', color: 'warning' }] : [])]
+
+  const current = requests.find(one => one.id === board?.current)
+  const asking = [...(current === undefined ? [] : [current]), ...requests.filter(one => one !== current && (one.state === 'ready' || one.state === 'stale'))]
+  const nowRows = asking.map(one =>
+    withButtons(
+      [
+        one.state === 'stale' ? { text: '!', color: 'warning' } : requestGlyph(one, nodes),
+        { text: ` ${one.title}` },
+        ...(one === current ? [{ text: `  ${one.done}/${one.total}  ` }, { text: t().progressThisSession, color: 'subtle' }] : []),
+        ...(one.state === 'ready' ? [{ text: '  ' }, { text: t().progressAwaiting, color: 'warning' }] : []),
+        ...(one.state === 'stale' ? [{ text: '  ' }, { text: t().progressQuietDays(Math.floor((now - one.updatedAt) / DAY_MS)), color: 'warning' }] : []),
+      ],
+      one.state === 'ready' ? [button(`progress-now-accept-${one.id}`, t().progressAccept, () => data.onAcceptRequest?.(one.id))] : [],
+    ),
+  )
+  const nowFrame = asking.length === 0 ? [] : [frame(el, [headerOf(el, t().progressNow, undefined, <Text color="subtle">{clockOf(now)}</Text>), ...nowRows])]
+
+  const pieceRow = (node: BoardNode) =>
+    withButtons(
+      [
+        PIECE_GLYPHS[node.status],
+        { text: ` ${node.status === 'todo' ? ' '.repeat(5) : clockOf(node.updatedAt)} ${node.title}` },
+        ...(node.commit === null ? [] : [{ text: `  ${node.commit}`, color: 'subtle' }]),
+      ],
+      node.status === 'done'
+        ? []
+        : [
+            button(`progress-done-${node.id}`, t().progressDone, () => data.onCloseNode?.(node.id, 'done')),
+            button(`progress-drop-${node.id}`, t().progressDrop, () => data.onCloseNode?.(node.id, 'dropped')),
+          ],
+      width - EDGE_CELLS,
+    )
+  const requestCard = (one: BoardRequest) => {
+    const rollup = rollupText(one)
+    const facts = joinParts([
+      ...(rollup === '' ? [] : [[{ text: rollup }]]),
+      ...(one.followUps > 0 ? [[{ text: t().progressFollowUps(one.followUps) }]] : []),
+      ...(one.state === 'ready' ? [[{ text: t().progressAwaiting, color: 'warning' }]] : []),
+    ])
+
+    return card(el, [
+      <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+        <Box flexShrink={1} minWidth={0}>
+          {lineText(el, fitLine([requestGlyph(one, nodes), { text: ` ${one.title}` }], width - AGE_CELLS))}
+        </Box>
+        {lineText(el, ageLine(one), 'subtle')}
+      </Box>,
+      ...(facts.length === 0 ? [] : [lineText(el, fitLine(facts, width - EDGE_CELLS), 'subtle')]),
+      ...requestPieces(one, nodes).map(pieceRow),
+      <Box flexDirection="row" columnGap={1}>
+        {button(`progress-accept-${one.id}`, t().progressAccept, () => data.onAcceptRequest?.(one.id))}
+        {button(`progress-dropreq-${one.id}`, t().progressDropRequest, () => data.onDropRequest?.(one.id))}
+      </Box>,
+    ])
+  }
+  const closedRow = (one: BoardRequest) =>
+    lineText(el, fitLine([PIECE_GLYPHS.done, { text: ` ${one.title}  ${one.total === 0 ? '' : `${one.done}/${one.total}  `}${progressAge(now - one.updatedAt)}` }], width))
+  // Requests of one title pattern holding a version, CHAIN_MIN or more of them, oldest first.
+  const chainsOf = (list: readonly BoardRequest[]) =>
+    [...new Set(list.map(one => titlePattern(one.title)))]
+      .filter(pattern => pattern.includes('<ver>'))
+      .map(pattern => list.filter(one => titlePattern(one.title) === pattern).sort((a, b) => a.at - b.at))
+      .filter(chain => chain.length >= CHAIN_MIN)
+  const chainLine = (chain: readonly BoardRequest[]): Line =>
+    chain.flatMap((one, i): Line => [
+      ...(i === 0 ? [] : [{ text: ' ─ ' }]),
+      { text: `${VERSION.exec(one.title)?.[0] ?? one.title} ` },
+      requestGlyph(one, nodes),
+      ...(one.status === 'open' ? [{ text: `${one.done}/${one.total}` }] : []),
+    ])
+  const section = (name: string, list: readonly BoardRequest[]) => {
+    const chains = chainsOf(list)
+    // A series member still open keeps its card, so its pieces can be closed; a closed one shows only in the chain.
+    const rest = list.filter(one => one.state !== 'closed' || !chains.some(chain => chain.includes(one)))
+    const closed = rest.filter(one => one.state === 'closed')
+    const open = list.filter(one => one.status === 'open').length
+    const head = `${name}${chains.length === 0 ? '' : ` (${t().progressSeries})`}`
+
+    return (
+      <Box flexDirection="column" gap={1}>
+        {lineText(el, fitLine([{ text: head, bold: true }, { text: ` · ${t().progressOpenClosed(open, list.length - open)}`, color: 'subtle' }], width))}
+        {chains.map(chain => lineText(el, fitLine(chainLine(chain), width)))}
+        {rest.filter(one => one.state !== 'closed').map(requestCard)}
+        {closed.slice(0, LISTED_CLOSED).map(closedRow)}
+        {closed.length > LISTED_CLOSED ? <Text color="subtle">{fit(t().progressMoreClosed(closed.length - LISTED_CLOSED), width)}</Text> : null}
+      </Box>
+    )
+  }
+  const lines = (board?.lines ?? []).filter(line => line.status === 'active' && requests.some(one => one.line === line.id)).sort((a, b) => b.updatedAt - a.updatedAt)
+  const loose = requests.filter(one => !lines.some(line => line.id === one.line))
+  const legacy = legacyNodes(nodes)
 
   return [
     <Box flexDirection="column" gap={2}>
-      {progressGroups(nodes).map(group =>
+      {nowFrame}
+      {lines.map(line => section(line.name.toUpperCase(), requests.filter(one => one.line === line.id)))}
+      {loose.length === 0 ? null : section(`${t().progressNoLine} · ${loose.length}`, loose)}
+      {legacy.length === 0 ? null : headerOf(el, `${t().progressNoRequest} · ${legacy.length}`)}
+      {progressGroups(legacy).map(group =>
         frame(el, [
           headerOf(el, t().progressStatuses[group.status], group.nodes.length),
           ...capped(
             el,
             data,
             `progress-${group.status}`,
-            group.nodes.map(node => (
-              <Box flexDirection="column">
-                {lineText(el, fitLine([{ text: ` ${t().progressStatuses[node.status]} `, color: PROGRESS_COLORS[node.status], bold: true }, { text: ` ${node.title}` }], width))}
-                {lineText(el, [{ text: fit(progressMeta(node, nodes), width) }], 'subtle')}
-              </Box>
-            )),
+            group.nodes.map(node => {
+              const head: Line = [
+                { text: ` ${t().progressStatuses[node.status]} `, color: progressColor(node, data.now), bold: true },
+                { text: ` ${node.title}`, ...(staleHours(node, data.now) !== null && { color: 'inactive' }) },
+              ]
+              const doneWhen = progressDoneWhen(node)
+
+              return (
+                <Box flexDirection="column">
+                  {node.status === 'done' ? (
+                    lineText(el, fitLine(head, width))
+                  ) : (
+                    <Box flexDirection="row" columnGap={1} alignItems="center">
+                      <Box flexGrow={1} flexShrink={1} minWidth={0}>
+                        {lineText(el, fitLine(head, width - 2 * BUTTON_CELLS))}
+                      </Box>
+                      <Button key={`progress-done-${node.id}`} label={t().progressDone} variant="secondary" onPress={() => data.onCloseNode?.(node.id, 'done')} />
+                      <Button key={`progress-drop-${node.id}`} label={t().progressDrop} variant="secondary" onPress={() => data.onCloseNode?.(node.id, 'dropped')} />
+                    </Box>
+                  )}
+                  {lineText(el, [{ text: fit(progressMeta(node, nodes, data.now), width) }], 'subtle')}
+                  {doneWhen === null ? null : lineText(el, [{ text: fit(doneWhen, width) }], 'subtle')}
+                </Box>
+              )
+            }),
           ),
         ]),
       )}
@@ -1300,12 +1493,12 @@ function gpuBody(el: El, data: PaneData) {
   return [top, ...cards, ...top5]
 }
 
-export function drawDesktopPaneError(el: El, data: Pick<PaneData, 'page' | 'pages' | 'onPage' | 'onClose'> & { message: string; columns?: number }) {
+export function drawDesktopPaneError(el: El, data: Pick<PaneData, 'page' | 'pages' | 'onPage' | 'onClose'> & { message: string }) {
   const { Box, Text } = el
 
   return (
     <Box flexDirection="column" rowGap={1}>
-      {tabs(el, { page: data.page, pages: data.pages, onPage: data.onPage, columns: data.columns ?? 80 })}
+      {tabs(el, data)}
       <Text color="error" wrap="truncate">{`✗ ${data.message}`}</Text>
     </Box>
   )

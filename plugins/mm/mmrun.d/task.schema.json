@@ -3,10 +3,10 @@
   "additionalProperties": false,
   "required": ["summary", "checks_run", "not_verified", "decisions_made", "questions", "status"],
   "properties": {
-    "summary": { "type": "string", "description": "2-6 sentences: what was done and the single most important caveat." },
+    "summary": { "type": "string", "description": "At most two sentences: the outcome and the single most important caveat. No file lists (the patch stat shows them), no per-item lists, no test counts (checks_run has them)." },
     "checks_run": {
       "type": "array",
-      "description": "Commands actually executed. Empty if none.",
+      "description": "The final run of each acceptance command, and for each regression test you added one run showing it failing before the fix. Leave out intermediate reruns. Empty if none.",
       "items": {
         "type": "object",
         "additionalProperties": false,

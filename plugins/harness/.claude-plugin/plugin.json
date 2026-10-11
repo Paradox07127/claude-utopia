@@ -1,6 +1,6 @@
 {
   "name": "harness",
-  "version": "0.4.12",
+  "version": "0.4.17",
   "description": "Skills and guard hooks: ai-code-cleanup, interrogate, shape-task, verify-change, setup, a shared-worktree git guard, and a guard against reading API-key config files",
   "author": { "name": "Paradox07127" },
   "types": "./types/index.d.ts",
@@ -15,7 +15,7 @@
       "type": "boolean",
       "default": true,
       "title": "Shared-tree git guard",
-      "description": "Refuse git commands that discard uncommitted changes or rewrite HEAD in the main worktree."
+      "description": "In the main worktree, refuse git commands that discard uncommitted changes (checkout of paths or --force, restore, stash, clean, switch --discard-changes, reset --hard) and git commit --amend."
     },
     "idleCompact": {
       "type": "boolean",

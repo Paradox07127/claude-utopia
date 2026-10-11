@@ -1,6 +1,6 @@
 ---
 name: interrogate
-description: Use when auditing an existing project, taking over an unfamiliar codebase, suspecting the architecture has grown crooked, wanting to know which modules nobody dares touch, or asked to "interrogate this project". Anchors every question in git facts; each one must carry file:line + git evidence + the action to take if nobody can answer. It audits "why the whole project ended up this way", not a single change — for change review use /mm:review. 触发词:拷打这个项目、审项目。
+description: Use when auditing an existing project, taking over an unfamiliar codebase, suspecting the architecture has grown crooked, wanting to know which modules nobody dares touch, or asked to "interrogate this project". It audits "why the whole project ended up this way", not a single change — for change review use /mm:review. 触发词:拷打这个项目、审项目。
 ---
 
 # interrogate — grill the project
@@ -22,7 +22,7 @@ Reply in the user's language.
 | No argument (default) | ~15 min | Fact tables + at most 10 questions |
 | `--exhaustive` | ~40 min | Adds a `/mm:review`-style cross-check round: codex picks out the weak items in Claude's questions, Claude picks back. No cap on the count |
 
-**You may only move up a level, never down.** When torn between two levels, take the heavier one. The urge to slap a lightweight label on it to skip work is itself the signal to move up.
+**You may only move up a level, never down.** When torn between `--recon` and the default, take the default; `--exhaustive` runs only when the user asks for it. The urge to slap a lightweight label on it to skip work is itself the signal to move up.
 
 ## Step 0: health check (decides which analyses are meaningful; do not skip)
 
@@ -130,7 +130,7 @@ A repo-wide grep produces **candidates, not conclusions**. Three steps:
 
 Mark each with: grep hit count | called only by tests or not | needs probe verification or not
 
-Off-the-shelf tools: `knip` for JS/TS, `vulture` for Python. (`ts-prune` is archived; don't use it.)
+Off-the-shelf tools: `knip` for JS/TS, `vulture` for Python. (Use `knip`, not `ts-prune`.)
 
 ## Output
 

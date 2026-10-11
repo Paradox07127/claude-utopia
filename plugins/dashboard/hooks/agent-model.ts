@@ -120,6 +120,21 @@ export function toolLabel(e: { tool: string; file_path?: unknown; command?: unkn
   return e.tool
 }
 
+/** `45s`, `27m`, `2h05m`, `3d`: an overview age, the seconds dropped past a minute. */
+export function fmtAge(ms: number): string {
+  const s = Math.max(0, Math.floor(ms / 1000))
+
+  if (s < 60) {
+    return `${s}s`
+  }
+
+  if (s < 3600) {
+    return `${Math.floor(s / 60)}m`
+  }
+
+  return s < 86_400 ? `${Math.floor(s / 3600)}h${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}m` : `${Math.floor(s / 86_400)}d`
+}
+
 export function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
 

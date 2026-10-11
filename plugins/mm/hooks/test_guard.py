@@ -17,9 +17,11 @@ SCRATCH = tempfile.TemporaryDirectory()  # guard 的拦截日志写这里,不碰
 failures = []
 
 
-def run(stdin, home=None):
+def run(stdin, home=None, **env):
+    """跑一次 guard;会话变量只用 env 给的,不继承本机会话的。"""
+    base = {k: v for k, v in os.environ.items() if k not in ("MMRUN_SESSION", "CLAUDE_CODE_HOST_SESSION_ID")}
     p = subprocess.run([sys.executable, str(GUARD)], input=stdin, capture_output=True, text=True, timeout=10,
-                       env=dict(os.environ, HOME=home or f"{SCRATCH.name}/home"))
+                       env=dict(base, HOME=home or f"{SCRATCH.name}/home", **env))
     return p.returncode, p.stdout, p.stderr
 
 
@@ -46,7 +48,8 @@ def bash(command, **extra):
 
 def denied(payload):
     code, _, err = run(json.dumps(payload))
-    return code, err.startswith("mm: *.raw is the full event stream") and "`mmrun status <RUNID>`" in err
+    return code, (err.startswith("mm: *.raw is the full event stream") and "`mmrun status <RUNID>`" in err
+                  and "the only allowed form is `tail -n N <file>.raw` with N at most 50, optionally `| cut -c1-M` with M at most 1000." in err)
 
 
 # 前台 wait 转后台,原字段保留
@@ -91,6 +94,17 @@ for cmd in [f"tail -200 {RUN}/codex.raw", f"tail -n 51 {RUN}/codex.raw", f"tail 
             f"cat {RUN}/codex.raw", f"tail -20 {RUN}/codex.raw; cat {RUN}/codex.raw",
             f"tail -20 {RUN}/codex.raw && cat {RUN}/codex.raw", f"tail -20 {RUN}/codex.raw $(cat {RUN}/codex.raw)"]:
     expect(f"非有界 tail 拒绝 [{cmd}]", denied({"tool_name": "Bash", "tool_input": {"command": cmd}}), (2, True))
+
+# 有界 tail 后面只接一个 cut -c1-M(M ≤ 1000)也放行:长 JSON 行按字节截断
+for cmd in [f"tail -n 20 {RUN}/codex.raw | cut -c1-300", "tail -20 ~/.claude/mmruns/R/grok.raw|cut -c1-1000"]:
+    code, out, err = run(json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}}))
+    expect(f"有界 tail | cut 放行 [{cmd}]", (code, out, err), (0, "", ""))
+for cmd in [f"tail -n 20 {RUN}/codex.raw | cut -c1-5000", f"tail -n 51 {RUN}/codex.raw | cut -c1-300",
+            f"tail -n 20 {RUN}/codex.raw | cut -c1-300 | cat", f"tail -n 20 {RUN}/codex.raw | cut -c1-300; rm x",
+            f"tail -n 20 {RUN}/codex.raw | cut -c2-300", f"tail -n 20 {RUN}/codex.raw | cut -c1-", f"tail -n 20 {RUN}/codex.raw | cut -f1"]:
+    expect(f"tail | cut 其它形式拒绝 [{cmd}]", denied({"tool_name": "Bash", "tool_input": {"command": cmd}}), (2, True))
+code, out, err = run(json.dumps({"tool_name": "Bash", "tool_input": {"command": "tail -n 20 codex.raw | cut -c1-300"}, "cwd": RUN}))
+expect("cwd 下有界 tail | cut 放行", (code, out, err), (0, "", ""))
 
 # 相对路径按 Bash 的 cwd 和 cd 解析:人在 run 目录里也拦,有界 tail 照样放行
 for cmd, cwd in [("cat codex.raw", RUN), ("cat ../20261001-000000-aaaa/grok.raw", RUN),
@@ -142,6 +156,45 @@ readonly = f"{SCRATCH.name}/home-ro"
 os.makedirs(readonly)
 open(f"{readonly}/.claude", "w").close()
 expect("日志写不了 拒绝结果不变", run(read_raw, readonly), got)
+
+# 主线程等插件在监控的 run(标记是 watched,或 watched <本会话 id>)→ 拒绝;空标记、别的会话、subagent、算不出 run 的照旧转后台
+home = f"{SCRATCH.name}/wait-home"
+runs = pathlib.Path(home, ".claude/mmruns")
+for rid, mark in [("W1", "watched\n"), ("E1", ""), ("L1", "watched\n"), ("S1", "watched sess-a\n")]:
+    (runs / rid).mkdir(parents=True)
+    (runs / rid / "watched").write_text(mark)
+(runs / ".latest-s_1").write_text("L1\n")
+(runs / ".latest-host_x").write_text("L1\n")
+WAIT_DENY = "mm: the mm plugin watches {} and sends its result when it ends; do not wait for it.\n"
+wait = lambda cmd, **extra: json.dumps({"tool_name": "Bash", "tool_input": {"command": cmd}, **extra})
+for name, cmd, env, rid in [
+    ("带 RUNID", "mmrun wait W1 --timeout 3600", {}, "W1"),
+    ("--timeout 在前", "mmrun wait --timeout 600 W1", {}, "W1"),
+    ("启动器后", "cd /r && timeout 900 ~/.local/bin/mmrun wait W1", {}, "W1"),
+    ("重定向后接管道", "mmrun wait W1 --timeout 3600 2>&1 | tail -5", {}, "W1"),
+    ("重定向到文件", "mmrun wait W1 > /tmp/x; mmrun result codex W1", {}, "W1"),
+    ("无 RUNID 经 MMRUN_SESSION 的 .latest", "mmrun wait --timeout 600", {"MMRUN_SESSION": "s 1"}, "L1"),
+    ("无 RUNID 经 CLAUDE_CODE_HOST_SESSION_ID 的 .latest", "mmrun wait",
+     {"CLAUDE_CODE_HOST_SESSION_ID": "host/x"}, "L1"),
+    ("标记的会话与事件一致", "mmrun wait S1", {}, "S1"),
+]:
+    code, out, err = run(wait(cmd, session_id="sess-a"), home, **env)
+    expect(f"主线程等被监控的 run 拒绝 [{name}]", (code, out, err), (2, "", WAIT_DENY.format(rid)))
+code, _, _ = run(wait("mmrun wait W1", cwd="/w"), home)
+log = pathlib.Path(home, ".claude/harness/guard.jsonl")
+expect("拒绝等待写一行 mm-wait 日志", [json.loads(l)["guard"] for l in log.read_text().splitlines()][-1:], ["mm-wait"])
+for name, cmd, extra, env in [
+    ("空标记", "mmrun wait E1", {}, {}),
+    ("没有标记", "mmrun wait NOPE", {}, {}),
+    ("subagent", "mmrun wait W1", {"agent_id": "a1"}, {}),
+    ("无 RUNID 也无会话变量", "mmrun wait", {}, {}),
+    ("无 RUNID 且 .latest 不存在", "mmrun wait", {}, {"MMRUN_SESSION": "other"}),
+    ("标记的会话是别的会话", "mmrun wait S1", {"session_id": "sess-b"}, {}),
+    ("标记带会话但事件没有 session_id", "mmrun wait S1", {}, {}),
+]:
+    code, out, err = run(wait(cmd, **extra), home, **env)
+    spec = json.loads(out)["hookSpecificOutput"] if code == 0 and out.strip() else {}
+    expect(f"不拒绝,照旧转后台 [{name}]", (code, spec.get("updatedInput", {}).get("run_in_background"), err), (0, True, ""))
 
 # register.ts 的 tool.call 只能带 { tool: … } 匹配器且不匹配 Bash(claude-code#92533)
 SOURCE = (GUARD.parent / "register.ts").read_text()

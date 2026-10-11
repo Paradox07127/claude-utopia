@@ -23,6 +23,8 @@ const ASK_PRESSED = 'The person pressed the use-recommended button above the que
 // The ledger days changed since their files were last written, and the timer that writes them.
 let unwritten = new Set<string>()
 let ledgerTimer: Timer | null = null
+// One flush at a time, so an older one never lands after a newer one.
+let flushing: Promise<void> = Promise.resolve()
 // The open AskUserQuestion dialogs by thread, '' the main one: PermissionRequest carries no tool_use_id, and a thread waits on one dialog at a time.
 const asking = new Map<string, { at: number; input: unknown; remind: Timer }>()
 
@@ -76,8 +78,17 @@ async function noteUsage($: EngineInterface, fold: (day: UsageDay) => UsageDay):
   }
 }
 
+/** Queues a flush behind the one under way; it reads the ledger when its turn comes. */
+function writeLedger($: EngineInterface, isAll: boolean): Promise<void> {
+  const run = flushing.then(() => flushLedger($, isAll))
+
+  flushing = run.catch(() => undefined)
+
+  return run
+}
+
 /** Writes the ledger's changed days, or all of them, each its whole file; a day that fails waits for the next write. */
-async function writeLedger($: EngineInterface, isAll: boolean): Promise<void> {
+async function flushLedger($: EngineInterface, isAll: boolean): Promise<void> {
   ledgerTimer?.cancel()
   ledgerTimer = null
 
@@ -283,13 +294,14 @@ export function registerTimeline(on: On): void {
 
   // The dialog races the use-recommended button (ask-recommended.tsx); returning while `next(e)` is pending aborts the dialog beneath.
   on('tool.call', { tool: 'AskUserQuestion' }, async ($, e, next) => {
-    const labels = recommendedLabels(e.questions)
+    const questions = e.questions as { question: string }[]
+    const labels = recommendedLabels(questions)
 
     if (labels === null) {
       return next(e)
     }
 
-    const wait = awaitPress()
+    const wait = awaitPress(e.tool_use_id)
 
     try {
       const answered = await Promise.race([next(e), wait.pressed])
@@ -298,7 +310,7 @@ export function registerTimeline(on: On): void {
         return answered
       }
 
-      const result = { questions: e.questions, answers: Object.fromEntries(e.questions.map((one, i) => [one.question, labels[i]!])) }
+      const result = { questions, answers: Object.fromEntries(questions.map((one, i) => [one.question, labels[i]!])) }
 
       $.ui.log('ask: answered with the recommended options', { to: 'debug' })
       // The aborted dialog may report no result of its own: the ledger counts this one first.

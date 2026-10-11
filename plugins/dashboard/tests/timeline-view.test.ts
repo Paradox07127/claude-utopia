@@ -11,7 +11,7 @@ const T0 = 1_790_000_000_000
 const NOW = T0 + 96_000
 const BAR_CHARS = /[░█▏▎▍▌▋▊▉┄]/
 // Host types, so a drawn tree is plain data to walk.
-const EL = { Box: 'Box', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown' } as never
+const EL = { Box: 'Box', Client: 'Client', Text: 'Text', Button: 'Button', Svg: 'Svg', Markdown: 'Markdown' } as never
 
 const usage = (inTokens: number, output: number) => ({ input: 2_000, output, cacheRead: inTokens - 12_000, cacheWrite: 10_000 })
 
@@ -485,8 +485,8 @@ describe('timeline view, desktop', () => {
     expect(text).not.toContain('Agent')
     const widths = (columns: number) => nodesOf(drawHotspotsDesktop(EL, FIXTURE_ENDED, columns), 'Svg').map(svg => svg.props!.width)
 
-    expect(widths(50), 'narrow').toEqual([328, 328, 328, 328, 328])
-    expect(widths(80), 'standard').toEqual([498, 498, 498, 498, 498])
+    expect(widths(40), 'narrow').toEqual([328, 328, 328, 328, 328])
+    expect(widths(60), 'standard').toEqual([498, 498, 498, 498, 498])
     expect(widths(100), 'wide: the tools and the model side by side, the turns under them').toEqual([328, 328, 328, 328, 572])
     expect(nodesOf(drawn, 'Button').map(button => button.props!.label)).toEqual(['打开这一轮'])
   })

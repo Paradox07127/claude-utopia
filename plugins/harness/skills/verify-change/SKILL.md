@@ -16,7 +16,7 @@ node "${CLAUDE_SKILL_DIR}/scripts/change_analyzer.js" $ARGUMENTS
 By default it analyzes uncommitted changes in the working tree; `--mode staged` looks at the index, `--mode committed` looks at HEAD~1..HEAD, `-v` is verbose, `--json` is machine-readable.
 
 Once you have the report, do only two things:
-1. Relay each ⚠️ to the user, one by one (code changed >50 lines but DESIGN.md untouched, >30 lines but no tests, new files but README not updated, config changed but not documented).
+1. Relay each ⚠ and ℹ to the user, one by one (⚠: a module's code changed >50 lines but DESIGN.md untouched, code changed >30 lines but no tests; ℹ: new files but README not updated, config files changed, files deleted so references need checking).
 2. If the affected-modules field lists modules you never touched, check their callers with `codegraph_impact` or grep before drawing a conclusion.
 
 Do not write docs or tests for the user unless they ask.

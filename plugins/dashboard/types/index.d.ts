@@ -374,24 +374,87 @@ export type UsageLedger = { session: string; project: string; days: Record<strin
 /** The ledger files of the last 7 days as last read, per day: the other sessions' summed, and `session`'s own. */
 export type UsageRead = { session: string; others: Record<string, UsageDay>; own: Record<string, UsageDay> }
 
-export type BoardStatus = 'todo' | 'doing' | 'done' | 'blocked'
+/** `dropped` is set by the person (/progress-close, the progress page) or by a `progress_plan` call that no longer needs the piece; never by the recorder's model. */
+export type BoardStatus = 'todo' | 'doing' | 'done' | 'blocked' | 'dropped'
 
 export type BoardKind = 'feature' | 'fix' | 'research' | 'infra' | 'docs'
 
 /** A node that must finish first: `confirmed` once the person said so, else proposed. */
 export type BoardLink = { id: string; confirmed: boolean }
 
-/** What an event sets on its node; an update carries only what changed. */
-export type BoardFields = { title?: string; summary?: string; status?: BoardStatus; kind?: BoardKind; builds_on?: string[]; depends_on?: BoardLink[] }
+/**
+ * What an event sets on its node; an update carries only what changed. `request`: the request it belongs to, `''` on nodes
+ * recorded before requests; `discovered_from`: the node whose work found it, `''` when none.
+ */
+export type BoardFields = {
+  title?: string
+  summary?: string
+  status?: BoardStatus
+  kind?: BoardKind
+  done_when?: string
+  builds_on?: string[]
+  depends_on?: BoardLink[]
+  request?: string
+  discovered_from?: string
+}
+
+/** A node event; `record` adds the main turn's id, its new commits' short shas and the top-level directories it edited (at most 8). */
+export type NodeEvent = { type: 'add' | 'update'; node: string; at: number; session: string; commit: string | null; fields: BoardFields; turn?: string; commits?: string[]; dirs?: string[] }
+
+/** `dropped` is set by the person or by `progress_plan`; a request is never closed by a model. */
+export type RequestStatus = 'open' | 'closed' | 'dropped'
+
+/** What an event sets on its request; the first event of an id creates it, later ones carry only what changed. `line`: its line's id, `''` while unassigned. */
+export type RequestFields = { title?: string; acceptance?: string[]; status?: RequestStatus; resolution?: { by: 'piece' | 'check' | 'person' | 'backfill'; evidence: string }; line?: string }
+
+export type RequestEvent = { type: 'request'; request: string; at: number; session: string; commit: string | null; fields: RequestFields }
+
+/** What a line's requests share: path keys (`plugins/dashboard`), commit scopes, title patterns (`release <ver> cleanup`); newest first. */
+export type LineKeys = { paths: string[]; scopes: string[]; patterns: string[] }
+
+/** What an event sets on its line, a stream of requests about one subject with no strict order; the first event of an id creates it. */
+export type LineFields = { name?: string; definition?: string; keys?: LineKeys; status?: 'active' | 'retired'; merged_into?: string }
+
+export type LineEvent = { type: 'line'; line: string; at: number; session: string; commit: string | null; fields: LineFields }
+
+/** The person moved `request` from line `from` (`''` when it had none) to `to`; `keys` are the request's own, to find the correction again. */
+export type RelinkEvent = { type: 'relink'; request: string; from: string; to: string; at: number; session: string; commit: null; keys: LineKeys }
 
 /** One entry of a progress board's `<events dir>/<session>.json`, written by that session alone; `commit` is HEAD's short sha then, null when none was read. */
-export type BoardEvent = { type: 'add' | 'update'; node: string; at: number; session: string; commit: string | null; fields: BoardFields }
+export type BoardEvent = NodeEvent | RequestEvent | LineEvent | RelinkEvent
 
 /** A node as the events fold to it: `at` when it was added, `updatedAt` and `commit` of its latest event. */
 export type BoardNode = Required<BoardFields> & { id: string; at: number; updatedAt: number; commit: string | null }
 
-/** The progress board as last read: where it is kept, null before the person chose, and its nodes. */
-export type BoardRead = { storage: 'local' | 'git' | null; dir: string | null; nodes: BoardNode[] }
+/**
+ * A request as the events fold to it: `resolution` null while open; `session` of its first event; `pieces` its nodes in add
+ * order; `total` those neither dropped nor discovered from another, `followUps` the discovered ones not dropped. `updatedAt` is
+ * the latest event on it or its pieces. `ready`: stored open with every counted piece done; `stale`: open, not ready, 72 h quiet.
+ */
+export type BoardRequest = Required<Omit<RequestFields, 'resolution'>> & {
+  resolution: NonNullable<RequestFields['resolution']> | null
+  id: string
+  at: number
+  updatedAt: number
+  session: string
+  pieces: string[]
+  done: number
+  total: number
+  followUps: number
+  state: 'open' | 'ready' | 'stale' | 'closed' | 'dropped'
+}
+
+/**
+ * A line as the events fold to it: `merged_into` `''` unless merged; `at` its first event; `updatedAt` the latest event on it or
+ * its requests; `requests` those whose line it is, newest first, `open` and `closed` counted among them.
+ */
+export type BoardLine = Required<Omit<LineFields, 'merged_into'>> & { merged_into: string; id: string; at: number; updatedAt: number; requests: string[]; open: number; closed: number }
+
+/**
+ * The progress board as last read: where it is kept, null before the person chose; the project's short name; its nodes, requests
+ * and lines; `current` the id of this session's current request, null when it has none.
+ */
+export type BoardRead = { storage: 'local' | 'git' | null; dir: string | null; name: string; nodes: BoardNode[]; requests: BoardRequest[]; lines: BoardLine[]; current: string | null }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -435,6 +498,8 @@ declare module 'claude-code' {
       timelinePage: Shaped<DashTimelinePage | null>
       /** Epoch ms of the last redraw tick: the band, the prompt hint and the workbench read it, the transcript rows do not. */
       tick: number
+      /** Bumped to redraw the workbench when nothing it reads changed: a disclosure toggled, the overview's next change with time alone. */
+      paneWake: number
       /** The open running agent's transcript as last read; null before the first. */
       peek: Shaped<AgentPeek | null>
       /** Whether the Agents page shows its folded ended agents. */

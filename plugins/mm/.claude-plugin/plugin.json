@@ -1,6 +1,6 @@
 {
   "name": "mm",
-  "version": "0.4.8",
+  "version": "0.4.14",
   "description": "Cross-model review and delegation: /mm:review and /mm:run, built on mmrun",
   "author": { "name": "Paradox07127" },
   "types": "./types/index.d.ts",

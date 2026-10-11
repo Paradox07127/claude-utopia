@@ -1,11 +1,13 @@
 ---
 name: shape-task
-description: Use when a time-boxed coding task has to be done in about 30 minutes — technical interviews, hackathons, a sprint before a demo, timed take-homes. Speed first - the skeleton is the contract, no plan documents, no subagents, no review. Not for code review (use /mm:review), not for exploring an unfamiliar codebase (use /harness:interrogate), and not for architecture decisions when time is plentiful. 触发词:限时任务、面试题。
+description: Use when a time-boxed coding task has to be done in about 30 minutes — technical interviews, hackathons, a sprint before a demo, timed take-homes. Not for code review (use /mm:review), not for exploring an unfamiliar codebase (use /harness:interrogate), and not for architecture decisions when time is plentiful. 触发词:限时任务、面试题。
 ---
 
 # shape-task
 
 Reply in the user's language.
+
+During a time-boxed task, this skill's practices override the global rules on orchestration (dispatching workers) and wrap-up (review).
 
 **The plan is not the deliverable; the skeleton is.** If an output cannot be executed or run directly, do not write it.
 

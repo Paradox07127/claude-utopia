@@ -147,6 +147,8 @@ type World = {
   listDenied: Record<string, string>
   /** Awaited by the engine's fs.read before it answers. */
   beforeRead?: (path: string) => Promise<void>
+  /** The text of ~/.claude/progress/canvas.json; absent, the file is missing. */
+  canvas?: string
   /** Awaited by the engine's agent.spawn before it answers the n-th spawn. */
   beforeSpawn?: (n: number) => Promise<void>
   /** Every `$.ui.status` text, undefined for a clear. */
@@ -183,6 +185,7 @@ function seat(on: On, files: Files = {}, clock?: MockClock): World {
   let spawned = 0
 
   mock.env(on, { HOME: '/h' })
+  mock.store(on)
   on('session.id', () => ({ value: 'me' }))
   on('session.root', () => ({ value: '/work/harness' }))
   on('session.measure', ($, e) => ({ changed: e.changed }))
@@ -331,6 +334,10 @@ function seat(on: On, files: Files = {}, clock?: MockClock): World {
       const text = world.sessions[e.path.slice(SESSIONS.length + 1)]
 
       return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
+    }
+
+    if (e.path === '/h/.claude/progress/canvas.json') {
+      return world.canvas === undefined ? { deny: `ENOENT ${e.path}` } : { value: world.canvas }
     }
 
     const file = world.files[e.path.slice(ROOT.length + 1)]
@@ -841,7 +848,8 @@ describe('workbench', () => {
     world.alive.add('111')
     await $.session.start(SESSION)
     await clock.advance(3_000)
-    expect(world.commands).toEqual(['dashboard', 'subagents', 'mmrun', 'gpu', 'timeline'])
+    // progress-close and progress-line come from progress-hooks.ts, which the public export splits into its own plugin (release/split.json)
+    expect(world.commands.filter(name => !name.startsWith('progress-'))).toEqual(['dashboard', 'subagents', 'mmrun', 'gpu', 'timeline', 'progress'])
 
     await $.agent.spawn(SPAWN as never)
     await $.command.run(command('dashboard'))
@@ -872,13 +880,108 @@ describe('workbench', () => {
     const world = seat(on)
 
     await $.session.start(SESSION)
-    expect(world.specs.map(one => [one.name, one.immediate])).toEqual([
+    // progress-close and progress-line wait for the recording chain, so they are not immediate.
+    expect(world.specs.filter(one => !one.name.startsWith('progress-')).map(one => [one.name, one.immediate])).toEqual([
       ['dashboard', true],
       ['subagents', true],
       ['mmrun', true],
       ['gpu', true],
       ['timeline', true],
+      ['progress', true],
     ])
+  })
+
+  test('/progress opens the progress page; with an https canvas url its row names the canvas', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const world = seat(on)
+
+    await $.session.start(SESSION)
+    expect((await $.command.run(command('progress'))).text, 'no canvas file: no row').toBeUndefined()
+    expect(world.opened).toEqual([{ id: 'dashboard', title: '工作台' }])
+    expect(textOf(await $.ui.render(PANE))).toContain('存放位置')
+
+    world.canvas = '{}'
+    expect((await $.command.run(command('progress'))).text, 'no url').toBeUndefined()
+
+    world.canvas = JSON.stringify({ url: 'http://claude.ai/artifact/abc' })
+    expect((await $.command.run(command('progress'))).text, 'not https').toBeUndefined()
+
+    world.canvas = JSON.stringify({ url: 'https://claude.ai/artifact/abc' })
+    expect((await $.command.run(command('progress'))).text).toBe('画布: https://claude.ai/artifact/abc')
+  })
+
+  test('open_progress registers at session.start; a call opens the progress page and names only an https canvas url', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const world = seat(on)
+    const call = async () =>
+      ((await $.tool.call({ tool: 'mcp__dashboard__open_progress', tool_use_id: 'toolu_p' } as never)) as { result?: { type: string; text: string }[] }).result?.[0]
+
+    await $.session.start(SESSION)
+    // progress_plan comes from progress-hooks.ts, which the public export splits into its own plugin (release/split.json)
+    expect(world.tools.filter(name => name !== 'progress_plan')).toEqual(['open_progress'])
+
+    const bare = await call()
+
+    expect(world.opened).toEqual([{ id: 'dashboard', title: '工作台' }])
+    expect(textOf(await $.ui.render(PANE))).toContain('存放位置')
+    expect(bare?.text, 'no canvas file').toBe("Opened the workbench's Progress page for the person.")
+
+    world.canvas = JSON.stringify({ url: 'http://claude.ai/artifact/abc' })
+    expect((await call())?.text, 'not https').not.toContain('claude.ai')
+
+    world.canvas = JSON.stringify({ url: 'https://claude.ai/artifact/abc' })
+
+    const linked = await call()
+
+    expect(linked?.text).toContain('https://claude.ai/artifact/abc')
+  })
+
+  test('the open_progress result row: desktop draws a button to the progress page and a Link only with a canvas file; terminal one line', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const world = seat(on)
+    const CANVAS = 'https://claude.ai/artifact/abc'
+    const row = (surface: 'terminal' | 'desktop', isErrored = false) =>
+      ({
+        plugin: PLUGIN,
+        surface,
+        component: 'ToolResult',
+        requestId: 'toolu_p',
+        props: { tool_use_id: 'toolu_p', tool: 'mcp__dashboard__open_progress', output: [{ type: 'text', text: 'opened' }], isErrored },
+      }) as never
+
+    await $.session.start(SESSION)
+
+    const bare = await $.ui.mount(row('desktop'))
+
+    expect((await bare.find({ key: 'open-progress' }))?.props).toMatchObject({ label: '进度', variant: 'secondary' })
+    expect(await bare.findAll({ type: 'Link' }), 'no canvas url: no Link').toEqual([])
+    await bare.press({ key: 'open-progress' })
+    expect(world.opened).toEqual([{ id: 'dashboard', title: '工作台' }])
+    expect(textOf(await $.ui.render(PANE))).toContain('存放位置')
+    await bare.unmount()
+
+    world.canvas = JSON.stringify({ url: CANVAS })
+
+    const linked = await $.ui.mount(row('desktop'))
+
+    expect((await linked.findAll({ type: 'Link' })).map(one => one.props)).toEqual([expect.objectContaining({ href: CANVAS, label: '画布' })])
+    await linked.unmount()
+
+    const terminal = await $.ui.mount(row('terminal'))
+
+    expect(textOf(await terminal.drawn())).toBe(`进度 · /progress · 画布: ${CANVAS}`)
+    expect(await terminal.findAll({ type: 'Button' }), 'no button on the terminal').toEqual([])
+    await terminal.unmount()
+
+    const before = world.toolResults
+    const errored = await $.ui.mount(row('desktop', true))
+
+    expect(textOf(await errored.drawn()), 'errored: the engine draws it').toBe('engine band')
+    expect(world.toolResults - before).toBe(1)
+    await errored.unmount()
   })
 
   test('the overview behind another tab reads no worktrees; opened or on screen again it does', { options: { language: 'zh-CN' } }, async ($, on) => {
@@ -899,13 +1002,14 @@ describe('workbench', () => {
     expect(lists()).toBe(2)
   })
 
-  test('session.start runs whole: no hook fails, no tool registers', async ($, on) => {
+  test('session.start runs whole: no hook fails, only open_progress registers', async ($, on) => {
     mock.clock(on, { now: NOW })
 
     const world = seat(on)
 
     await $.session.start(SESSION)
-    expect(world.tools).toEqual([])
+    // progress_plan comes from progress-hooks.ts, which the public export splits into its own plugin (release/split.json)
+    expect(world.tools.filter(name => name !== 'progress_plan')).toEqual(['open_progress'])
     expect(world.logs.filter(one => one.text.includes('failed'))).toEqual([])
   })
 
@@ -916,7 +1020,7 @@ describe('workbench', () => {
 
     world.refusedNames.add('subagents')
     await $.session.start(SESSION)
-    expect(world.commands).toEqual(['dashboard', 'mmrun', 'gpu', 'timeline'])
+    expect(world.commands.filter(name => !name.startsWith('progress-'))).toEqual(['dashboard', 'mmrun', 'gpu', 'timeline', 'progress'])
     expect(mine(world)?.state).toBe('idle')
   })
 
@@ -2827,6 +2931,131 @@ describe('context under the prompt', () => {
     expect(world.hints.at(-1)?.hint).toBe('? for shortcuts · 上下文 85k/200k · 41%')
   })
 
+  const modeOf = (surface: 'terminal' | 'desktop'): RenderInput<'SessionMode'> => ({
+    component: 'SessionMode',
+    surface,
+    requestId: 'session-mode',
+    viewport: { columns: 120, rows: 40, isFullscreen: true },
+    props: { modes: ['plan'] },
+  })
+  /** The SessionMode labels that reach the engine beneath, one list per render. */
+  const modesBeneath = (on: On) => {
+    const seen: (readonly string[])[] = []
+
+    on('ui.render', { component: 'SessionMode' }, ($, e) => {
+      seen.push(e.props.modes)
+
+      return BOTTOM as never
+    })
+
+    return seen
+  }
+
+  // The desktop app shows SessionMode only as a tree a plugin draws: an engine node beneath draws nothing there.
+  test('desktop: SessionMode draws the modes and every rate-limit window itself, 5h first', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const modes = modesBeneath(on)
+
+    seat(on)
+    await $.session.start(SESSION)
+    await measure($, { ...HALF, rateLimits: [SEVEN_DAY, FIVE_HOUR], cost: { usd: 3.4123 }, changed: ['context', 'rateLimits', 'cost'] })
+
+    const ui = await $.ui.mount({ plugin: PLUGIN, ...modeOf('desktop') } as never)
+
+    expect((await ui.findAll({ type: 'Text' })).map(one => textOf(one))).toEqual(['plan', '5h 42% · 2h10m后重置', '7d 12% · 3d0h后重置'])
+    expect((await ui.findAll({ type: 'Svg' })).map(one => one.props.alt)).toEqual(['5h 42% · 2h10m后重置', '7d 12% · 3d0h后重置'])
+    expect(modes, 'not handed to the engine').toEqual([])
+  })
+
+  test('desktop: SessionMode colors each window bar by how much is used', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    seat(on)
+    await $.session.start(SESSION)
+    await measure($, { ...HALF, rateLimits: [{ ...SEVEN_DAY, percentUsed: 75 }, { ...FIVE_HOUR, percentUsed: 40 }], changed: ['context', 'rateLimits'] })
+
+    const ui = await $.ui.mount({ plugin: PLUGIN, ...modeOf('desktop') } as never)
+    const svgs = await ui.findAll({ type: 'Svg' })
+
+    expect((await ui.findAll({ type: 'Text' })).map(one => textOf(one))).toEqual(['plan', '5h 40% · 2h10m后重置', '7d 75% · 3d0h后重置'])
+    expect(svgs).toHaveLength(2)
+    expect(String(svgs[0]?.props.source), 'under 70%: green').toContain('fill="#16A34A"')
+    expect(String(svgs[1]?.props.source), '70% to 89%: amber').toContain('fill="#D97706"')
+  })
+
+  test('desktop: SessionMode draws a window at 90% or more in red', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    seat(on)
+    await $.session.start(SESSION)
+    await measure($, { ...HALF, rateLimits: [{ ...FIVE_HOUR, percentUsed: 95 }], changed: ['context', 'rateLimits'] })
+
+    const ui = await $.ui.mount({ plugin: PLUGIN, ...modeOf('desktop') } as never)
+    const svgs = await ui.findAll({ type: 'Svg' })
+
+    expect(svgs).toHaveLength(1)
+    expect(String(svgs[0]?.props.source)).toContain('fill="#DC2626"')
+  })
+
+  test('desktop: SessionMode with no rate limits but a cost adds the cost', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const modes = modesBeneath(on)
+
+    seat(on)
+    await $.session.start(SESSION)
+    await measure($, { ...HALF, cost: { usd: 3.4123 }, changed: ['context', 'cost'] })
+    expect(textOf(await $.ui.render(modeOf('desktop')))).toBe('plan & $3.41')
+    expect(modes, 'not handed to the engine').toEqual([])
+  })
+
+  test('desktop: SessionMode with neither a limit nor a cost draws the modes as given', async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    seat(on)
+    await $.session.start(SESSION)
+
+    const bare = await $.ui.mount({ plugin: PLUGIN, ...modeOf('desktop') } as never)
+
+    expect((await bare.findAll({ type: 'Text' })).map(one => textOf(one)), 'nothing measured').toEqual(['plan'])
+    await bare.unmount()
+    await measure($, HALF)
+
+    const context = await $.ui.mount({ plugin: PLUGIN, ...modeOf('desktop') } as never)
+
+    expect((await context.findAll({ type: 'Text' })).map(one => textOf(one)), 'only the context').toEqual(['plan'])
+  })
+
+  test('desktop: SessionMode carries two buttons that open the workbench on the overview and on progress', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const world = seat(on)
+
+    await $.session.start(SESSION)
+
+    const ui = await $.ui.mount({ plugin: PLUGIN, ...modeOf('desktop') } as never)
+
+    expect((await ui.find({ key: 'mode-workbench' }))?.props).toMatchObject({ label: '工作台', variant: 'secondary' })
+    expect((await ui.find({ key: 'mode-progress' }))?.props).toMatchObject({ label: '进度', variant: 'secondary' })
+    await ui.press({ key: 'mode-progress' })
+    expect(world.opened).toEqual([{ id: 'dashboard', title: '工作台' }])
+    expect(textOf(await $.ui.render(PANE))).toContain('存放位置')
+    await ui.press({ key: 'mode-workbench' })
+    expect(world.opened).toHaveLength(2)
+    expect(textOf(await $.ui.render(PANE))).not.toContain('存放位置')
+  })
+
+  test('terminal: SessionMode keeps the modes as given, the hint tail already has the limit', async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const modes = modesBeneath(on)
+
+    seat(on)
+    await $.session.start(SESSION)
+    await measure($, { ...HALF, rateLimits: [FIVE_HOUR], cost: { usd: 3.4123 }, changed: ['context', 'rateLimits', 'cost'] })
+    await $.ui.render(modeOf('terminal'))
+    expect(modes.at(-1)).toEqual(['plan'])
+  })
+
   test('no measurement yet: a dash; one with no fill yet, or a compaction since: a dash for the tokens', { options: { language: 'zh-CN' } }, async ($, on) => {
     mock.clock(on, { now: NOW })
 
@@ -3357,6 +3586,343 @@ const MM = {
     })
   },
 }
+
+describe('progress page close buttons', () => {
+  const BOARD = '/h/.claude/progress/-work-harness'
+  const added = (id: string, title: string, status: string) => ({
+    type: 'add',
+    node: id,
+    at: NOW - 3_600_000,
+    session: 'other',
+    commit: null,
+    fields: { title, summary: 's', status, kind: 'feature', done_when: 'tests pass', builds_on: [], depends_on: [] },
+  })
+
+  /**
+   * ~/.claude/progress in memory, a local board holding an open node n1 and a done n2; registered before seat, so outside its fs hooks.
+   * Nothing answers /progress-close: the buttons write the event themselves.
+   */
+  function board(on: On): { files: Record<string, string>; closes: () => unknown } {
+    const files: Record<string, string> = {
+      [`${BOARD}/config.json`]: JSON.stringify({ storage: 'local' }),
+      [`${BOARD}/events/other.json`]: JSON.stringify([added('n1', 'Open work', 'doing'), added('n2', 'Closed work', 'done')]),
+    }
+    const closes = () => JSON.parse(files[`${BOARD}/events/me.json`] ?? 'null')
+    const inBoard = { path: /^\/h\/\.claude\/progress\// }
+
+    on('fs.read', inBoard, ($, e) => {
+      const text = files[e.path]
+
+      return text === undefined ? { deny: `ENOENT ${e.path}` } : { value: text }
+    })
+    on('fs.write', inBoard, ($, e) => {
+      files[e.path] = e.text
+
+      return { value: undefined }
+    })
+    on('fs.list', inBoard, ($, e) => {
+      const entries = Object.entries(files)
+        .filter(([path]) => path.startsWith(`${e.path}/`) && !path.slice(e.path.length + 1).includes('/'))
+        .map(([path, text]) => ({ name: path.slice(e.path.length + 1), kind: 'file', size: text.length, mtimeMs: NOW, isLink: false }) as FsEntry)
+
+      return entries.length > 0 ? { value: entries } : { deny: `ENOENT ${e.path}` }
+    })
+
+    return { files, closes }
+  }
+
+  async function progressPage($: Engine, surface: 'terminal' | 'desktop') {
+    const ui = await $.ui.mount({ plugin: PLUGIN, ...PANE, surface } as never)
+
+    await ui.press({ key: 'page-overview' })
+    await ui.press({ key: 'page-progress' })
+
+    return ui
+  }
+
+  test('desktop: 完成 on an open node writes a done event to this session\'s file and re-reads the board; a done node has none', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { closes } = board(on)
+
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    expect((await ui.find({ key: 'progress-done-n1' }))?.props).toMatchObject({ label: '完成', variant: 'secondary' })
+    expect((await ui.find({ key: 'progress-drop-n1' }))?.props).toMatchObject({ label: '放弃', variant: 'secondary' })
+    expect(await ui.find({ key: 'progress-done-n2' })).toBeUndefined()
+    expect(await ui.find({ key: 'progress-drop-n2' })).toBeUndefined()
+
+    await ui.press({ key: 'progress-done-n1' })
+    expect(closes()).toEqual([{ type: 'update', node: 'n1', at: NOW, session: 'me', commit: null, fields: { status: 'done' } }])
+    expect(await ui.find({ key: 'progress-done-n1' }), 'read again: n1 is done').toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('desktop: 完成 on the one piece of an open request also closes the request', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files, closes } = board(on)
+    const request = { type: 'request', request: 'r1', at: NOW - 3_600_000, session: 'other', commit: null, fields: { title: 'Asked', acceptance: ['it works'], status: 'open' } }
+    const piece = { ...added('n1', 'Open work', 'doing'), fields: { ...added('n1', 'Open work', 'doing').fields, request: 'r1' } }
+
+    files[`${BOARD}/events/other.json`] = JSON.stringify([request, piece])
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    await ui.press({ key: 'progress-done-n1' })
+    expect(closes()).toMatchObject([
+      { type: 'update', node: 'n1', fields: { status: 'done' } },
+      { type: 'request', request: 'r1', fields: { status: 'closed', resolution: { by: 'piece' } } },
+    ])
+    await ui.unmount()
+  })
+
+  test('desktop: 放弃 writes a dropped event, and the node leaves the page', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { closes } = board(on)
+
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    await ui.press({ key: 'progress-drop-n1' })
+    expect(closes()).toMatchObject([{ node: 'n1', fields: { status: 'dropped' } }])
+    expect(textOf(await ui.drawn())).not.toContain('Open work')
+    await ui.unmount()
+  })
+
+  test('desktop: 完成 and 放弃 pressed at once on two nodes: both events land in this session\'s file', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files, closes } = board(on)
+
+    files[`${BOARD}/events/other.json`] = JSON.stringify([added('n1', 'Open work', 'doing'), added('n3', 'More work', 'todo')])
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    await Promise.all([ui.press({ key: 'progress-done-n1' }), ui.press({ key: 'progress-drop-n3' })])
+    expect(closes()).toMatchObject([
+      { node: 'n1', fields: { status: 'done' } },
+      { node: 'n3', fields: { status: 'dropped' } },
+    ])
+    await ui.unmount()
+  })
+
+  test('desktop: with a canvas url, 完成 also mirrors the event to the canvas in one ArtifactData batch', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files } = board(on)
+    const batches: { url: string; writes: { collection: string; data: { type?: string; node?: string; fields?: { status?: string } } }[] }[] = []
+
+    files['/h/.claude/progress/canvas.json'] = JSON.stringify({ url: 'https://claude.ai/artifact/abc' })
+    on('tool.call', { tool: 'ArtifactData' }, ($, e) => {
+      batches.push(e as never)
+
+      return { result: 'ok', text: 'ok' } as never
+    })
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    await ui.press({ key: 'progress-done-n1' })
+    expect(batches.map(one => one.url)).toEqual(['https://claude.ai/artifact/abc'])
+    expect(batches[0]!.writes.filter(one => one.collection.endsWith('/events')).map(one => [one.data.type, one.data.node, one.data.fields?.status])).toEqual([
+      ['add', 'n1', 'done'],
+      ['update', 'n1', 'done'],
+    ])
+    await ui.unmount()
+  })
+
+  test('terminal: no close buttons', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    board(on)
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'terminal')
+
+    expect(textOf(await ui.drawn())).toContain('Open work')
+    expect(await ui.find({ key: 'progress-done-n1' })).toBeUndefined()
+    expect(await ui.find({ key: 'progress-drop-n1' })).toBeUndefined()
+    await ui.unmount()
+  })
+
+  const HOUR = 3_600_000
+  const asked = (id: string, title: string, at: number, session = 'other', fields: Record<string, unknown> = {}) => ({
+    type: 'request',
+    request: id,
+    at,
+    session,
+    commit: null,
+    fields: { title, acceptance: ['it works'], status: 'open', ...fields },
+  })
+  const pieceOf = (id: string, title: string, status: string, request: string, at = NOW - HOUR, session = 'other') => {
+    const one = added(id, title, status)
+
+    return { ...one, at, session, fields: { ...one.fields, request } }
+  }
+
+  /** r1 asked in this session with a doing piece; another session's r2 ready, its r3 quiet for 4 days. */
+  function asks(files: Record<string, string>): void {
+    files[`${BOARD}/events/me.json`] = JSON.stringify([asked('r1', 'Mine', NOW - HOUR, 'me'), pieceOf('n1', 'Doing piece', 'doing', 'r1', NOW - HOUR, 'me')])
+    files[`${BOARD}/events/other.json`] = JSON.stringify([
+      asked('r2', 'Ready one', NOW - 2 * HOUR),
+      pieceOf('n2', 'Done piece', 'done', 'r2', NOW - 2 * HOUR),
+      asked('r3', 'Quiet one', NOW - 96 * HOUR),
+      pieceOf('n3', 'Waiting piece', 'todo', 'r3', NOW - 96 * HOUR),
+    ])
+  }
+
+  test('desktop: the now frame lists this session\'s request, a ready one with its 验收 button, a stale one', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files } = board(on)
+
+    asks(files)
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    expect(textOf(await ui.drawn())).toMatch(/现在.*▸ Mine.*本会话.*\? Ready one.*待验收.*! Quiet one.*4 天无更新/)
+    expect((await ui.find({ key: 'progress-now-accept-r2' }))?.props).toMatchObject({ label: '验收', variant: 'secondary' })
+    expect(await ui.find({ key: 'progress-now-accept-r1' }), 'this session\'s open request is not ready').toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('desktop: 验收 writes a closed request event by the person to this session\'s file and re-reads the board', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files, closes } = board(on)
+
+    asks(files)
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    expect((await ui.find({ key: 'progress-accept-r1' }))?.props).toMatchObject({ label: '验收', variant: 'secondary' })
+    await ui.press({ key: 'progress-accept-r1' })
+    expect((closes() as unknown[]).at(-1)).toEqual({ type: 'request', request: 'r1', at: NOW, session: 'me', commit: null, fields: { status: 'closed', resolution: { by: 'person', evidence: 'accepted on the progress page' } } })
+    expect(await ui.find({ key: 'progress-accept-r1' }), 'read again: r1 is closed').toBeUndefined()
+    await ui.unmount()
+  })
+
+  test('desktop: with a canvas url, 验收 also mirrors the request event to the canvas as a q… doc', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files } = board(on)
+    const batches: { url: string; writes: { collection: string; doc_id: string; data: { type?: string; request?: string; fields?: { status?: string } } }[] }[] = []
+
+    asks(files)
+    files['/h/.claude/progress/canvas.json'] = JSON.stringify({ url: 'https://claude.ai/artifact/abc' })
+    on('tool.call', { tool: 'ArtifactData' }, ($, e) => {
+      batches.push(e as never)
+
+      return { result: 'ok', text: 'ok' } as never
+    })
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    await ui.press({ key: 'progress-accept-r1' })
+    expect(batches.map(one => one.url)).toEqual(['https://claude.ai/artifact/abc'])
+    expect(batches[0]!.writes.filter(one => one.collection.endsWith('/events')).map(one => [one.doc_id, one.data.type, one.data.request, one.data.fields?.status])).toEqual([
+      [`q${NOW}-r1`, 'request', 'r1', 'closed'],
+    ])
+    await ui.unmount()
+  })
+
+  test('desktop: 放弃请求 writes a dropped request event, its pieces left as they are, and the request leaves the page', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files, closes } = board(on)
+
+    asks(files)
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    expect((await ui.find({ key: 'progress-dropreq-r1' }))?.props).toMatchObject({ label: '放弃请求', variant: 'secondary' })
+    await ui.press({ key: 'progress-dropreq-r1' })
+    expect(closes()).toHaveLength(3)
+    expect((closes() as unknown[]).at(-1)).toEqual({ type: 'request', request: 'r1', at: NOW, session: 'me', commit: null, fields: { status: 'dropped' } })
+    expect(textOf(await ui.drawn())).not.toContain('Mine')
+    await ui.unmount()
+  })
+
+  test('desktop: three requests of one line titled 发布 <ver> draw as one chain, oldest first', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files } = board(on)
+    const line = { type: 'line', line: 'l1', at: NOW - 5 * HOUR, session: 'other', commit: null, fields: { name: 'release', definition: 'the releases', status: 'active', keys: { paths: [], scopes: [], patterns: [] } } }
+    const closed = { line: 'l1', status: 'closed', resolution: { by: 'person', evidence: 'done' } }
+
+    files[`${BOARD}/events/other.json`] = JSON.stringify([
+      line,
+      asked('r1', '发布 0.8.3 清理', NOW - 4 * HOUR, 'other', closed),
+      asked('r2', '发布 0.8.4 清理', NOW - 3 * HOUR, 'other', closed),
+      asked('r3', '发布 0.8.5 清理', NOW - 2 * HOUR, 'other', { line: 'l1' }),
+      pieceOf('p1', 'Tag', 'done', 'r3'),
+      pieceOf('p2', 'Notes', 'doing', 'r3'),
+      pieceOf('p3', 'Upload', 'todo', 'r3'),
+    ])
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+    const text = textOf(await ui.drawn())
+
+    expect(text).toContain('RELEASE (系列)')
+    expect(text).toContain('0.8.3 ✓ ─ 0.8.4 ✓ ─ 0.8.5 ▸1/3')
+    await ui.unmount()
+  })
+
+  test('desktop: an open request of a series keeps its card under the chain; its closed members stay only in the chain', { options: { language: 'zh-CN' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+
+    const { files, closes } = board(on)
+    const line = { type: 'line', line: 'l1', at: NOW - 5 * HOUR, session: 'other', commit: null, fields: { name: 'release', definition: 'the releases', status: 'active', keys: { paths: [], scopes: [], patterns: [] } } }
+    const closed = { line: 'l1', status: 'closed', resolution: { by: 'person', evidence: 'done' } }
+
+    files[`${BOARD}/events/other.json`] = JSON.stringify([
+      line,
+      asked('r1', '发布 0.8.3 清理', NOW - 4 * HOUR, 'other', closed),
+      asked('r2', '发布 0.8.4 清理', NOW - 3 * HOUR, 'other', closed),
+      asked('r3', '发布 0.8.5 清理', NOW - 2 * HOUR, 'other', { line: 'l1' }),
+      pieceOf('p1', 'Tag', 'done', 'r3'),
+      pieceOf('p2', 'Notes', 'doing', 'r3'),
+      pieceOf('p3', 'Upload', 'todo', 'r3'),
+    ])
+    seat(on)
+    await $.session.start(SESSION)
+
+    const ui = await progressPage($, 'desktop')
+
+    expect(textOf(await ui.drawn())).toContain('0.8.3 ✓ ─ 0.8.4 ✓ ─ 0.8.5 ▸1/3')
+    expect((await ui.find({ key: 'progress-accept-r3' }))?.props).toMatchObject({ label: '验收' })
+    expect(await ui.find({ key: 'progress-dropreq-r3' })).toBeDefined()
+    expect(await ui.find({ key: 'progress-drop-p3' })).toBeDefined()
+    expect(await ui.find({ key: 'progress-accept-r1' }), 'a closed member has no card').toBeUndefined()
+    expect(await ui.find({ key: 'progress-accept-r2' })).toBeUndefined()
+
+    await ui.press({ key: 'progress-done-p2' })
+    expect(closes()).toEqual([{ type: 'update', node: 'p2', at: NOW, session: 'me', commit: null, fields: { status: 'done' } }])
+    await ui.unmount()
+  })
+})
 
 describe('commands that open the workbench', () => {
   // A command's text is stored as a transcript row the model reads: opening a page tells the model nothing.

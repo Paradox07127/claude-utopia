@@ -1,6 +1,6 @@
 import type { SessionRateLimit } from 'claude-code'
 
-import type { AgentRun, AgentUsage, AskCounts, BoardNode, BoardRead, BoardStatus, DashSeen, GateRun, MmModel, MmRun, MmSnapshot, SessionPresence, UsageCounts, WorktreeInfo } from '../types'
+import type { AgentRun, AgentUsage, AskCounts, BoardNode, BoardRead, BoardRequest, BoardStatus, DashSeen, GateRun, MmModel, MmRun, MmSnapshot, SessionPresence, UsageCounts, WorktreeInfo } from '../types'
 import { bandText, elapsedOf, fit, fmtDuration, fmtTokens, glyphOf, widthOf } from './agent-model'
 import { t } from './i18n'
 import { elapsedSecs, fmtRunTokens, fmtSecs, isFailedModel, runLabel } from './runs'
@@ -44,7 +44,9 @@ const PERMISSION = 'permission'
 const SUCCESS = 'success'
 const WARNING = 'warning'
 
-export type Seg = { text: string; color?: string; bold?: boolean; dim?: boolean }
+/** A time a segment shows, counted from `from` (epoch ms) at `now`: the desktop draws it as a Client keyed `key` that moves each second. */
+export type Live = { key: string; from: number; now: number; format: 'duration' | 'age' }
+export type Seg = { text: string; color?: string; bold?: boolean; dim?: boolean; live?: Live }
 export type Line = Seg[]
 
 /** 1 failed or denied and not yet seen, 2 ended within FRESH_MS, 3 running; null when off the band. */
@@ -267,6 +269,24 @@ export function limitText(limit: SessionRateLimit, now: number): string {
 }
 
 /** When the band's pending gates next change with time alone: a gate's expiry; null when none will. */
+/** When the overview next changes with time alone: a running agent turning quiet, a failed gate leaving needs-you, a reply going stale; null for never. */
+export function nextOverviewChange(
+  agents: readonly AgentRun[],
+  gates: readonly GateRun[],
+  peers: readonly SessionPresence[],
+  now: number,
+  trees: readonly WorktreeInfo[] | null,
+  flights: ReadonlyMap<string, Flight>,
+): number | null {
+  const times = [
+    ...agents.filter(run => run.state === 'running' && flights.get(run.agentId) === undefined && !isStalled(run, now)).map(run => run.lastActivityAt + STALL_MS),
+    ...pendingGates(gates, now, trees).map(gate => gate.at + GATE_PENDING_MS),
+    ...peers.filter(peer => peer.state === 'replied' && !isStaleReply(peer, now)).map(peer => peer.since + REPLIED_STALE_MS),
+  ]
+
+  return times.length === 0 ? null : Math.min(...times)
+}
+
 export function nextBandChange(gates: readonly GateRun[], now: number, trees: readonly WorktreeInfo[] | null = null): number | null {
   const times = pendingGates(gates, now, trees).map(gate => gate.at + GATE_PENDING_MS)
 
@@ -763,11 +783,14 @@ export function idleLine(recent: OverviewItem | undefined, gate: GateRun | undef
 }
 
 /** `✓ worker · Build mm plugin · 12m00s ago`. */
-export function endedText(item: OverviewItem, now: number): string {
+/** `✓ worker · Build mm plugin`: an ended item's glyph and title. */
+export function endedHead(item: OverviewItem): string {
   const glyph = item.kind === 'agent' ? glyphOf(item.run.state).glyph : item.model.status === 'DONE' ? '✓' : '✗'
 
-  return `${glyph} ${itemTitle(item)} · ${t().ago(fmtDuration(now - (endedAtOf(item) ?? now)))}`
+  return `${glyph} ${itemTitle(item)}`
 }
+
+export const endedText = (item: OverviewItem, now: number) => `${endedHead(item)} · ${t().ago(fmtDuration(now - (endedAtOf(item) ?? now)))}`
 
 /** Cuts a line of segments to `columns` cells, ending in `…` when cut. */
 export function fitLine(line: Line, columns: number): Line {
@@ -1089,35 +1112,295 @@ export function usageLines(week: UsageWeek, columns: number): Line[] {
 }
 
 /** Each status's theme key on the progress page. */
-export const PROGRESS_COLORS: Record<BoardStatus, string> = { doing: PERMISSION, blocked: ERROR, todo: INACTIVE, done: SUCCESS }
+export const PROGRESS_COLORS: Record<BoardStatus, string> = { doing: PERMISSION, blocked: ERROR, todo: INACTIVE, done: SUCCESS, dropped: INACTIVE }
 
-/** The progress page's groups in order, the empty ones left out; each newest first. */
+const PROGRESS_ORDER: readonly BoardStatus[] = ['doing', 'blocked', 'todo', 'done']
+
+/** The progress page's groups in order, the empty ones and dropped nodes left out; each newest first. */
 export function progressGroups(nodes: readonly BoardNode[]): { status: BoardStatus; nodes: BoardNode[] }[] {
   const newest = [...nodes].sort((a, b) => b.updatedAt - a.updatedAt)
 
-  return (['doing', 'blocked', 'todo', 'done'] as const).map(status => ({ status, nodes: newest.filter(one => one.status === status) })).filter(group => group.nodes.length > 0)
+  return PROGRESS_ORDER.map(status => ({ status, nodes: newest.filter(one => one.status === status) })).filter(group => group.nodes.length > 0)
 }
 
-/** `feature · 2026-10-03 · builds on: Usage page, Ask reminder`: a node's kind, the day it last changed and what it extends. */
-export function progressMeta(node: BoardNode, nodes: readonly BoardNode[]): string {
+const STALE_MS = 24 * 3_600_000
+
+/** Whole hours a doing node has gone without an update, 24 or more; else null. */
+export function staleHours(node: BoardNode, now: number): number | null {
+  return node.status === 'doing' && now - node.updatedAt >= STALE_MS ? Math.floor((now - node.updatedAt) / 3_600_000) : null
+}
+
+/** A node's status theme key: a stale doing node's is inactive. */
+export function progressColor(node: BoardNode, now: number): string {
+  return staleHours(node, now) === null ? PROGRESS_COLORS[node.status] : INACTIVE
+}
+
+/** `Done when: <done_when>` for a node not done that has one; else null. */
+export function progressDoneWhen(node: BoardNode): string | null {
+  return node.status === 'done' || node.done_when === '' ? null : t().progressDoneWhen(node.done_when)
+}
+
+/** `feature · 2026-10-03 · builds on: Usage page, Ask reminder`: a node's kind, the day it last changed and what it extends; a stale node's hours without an update. */
+export function progressMeta(node: BoardNode, nodes: readonly BoardNode[], now: number): string {
   const titles = node.builds_on.map(id => nodes.find(one => one.id === id)?.title ?? id)
+  const hours = staleHours(node, now)
 
-  return [t().progressKinds[node.kind], dayOf(node.updatedAt), ...(titles.length === 0 ? [] : [t().progressBuildsOn(titles)])].join(' · ')
+  return [t().progressKinds[node.kind], dayOf(node.updatedAt), ...(titles.length === 0 ? [] : [t().progressBuildsOn(titles)]), ...(hours === null ? [] : [t().progressStale(hours)])].join(' · ')
 }
 
-/** The progress page as lines: per group its head and count, then per node its status and title, its metadata dim beneath. */
-export function progressLines(board: BoardRead | null, columns: number): Line[] {
-  const nodes = board?.nodes ?? []
+// The terminal progress page: lanes for this many lines, two cells each; pieces listed under a request, legacy nodes listed.
+const LANES = 3
+const LISTED_PIECES = 4
+const LISTED_LEGACY = 10
+// The rollup's most cells; the age column's width, `30d!` the widest.
+const ROLLUP_CELLS = 8
+const AGE_COLUMNS = 4
+// Closed requests older than this fold into one line.
+const CLOSED_SHOWN_MS = 7 * DAY_MS
+const SUBTLE = 'subtle'
 
-  if (nodes.length === 0) {
+/** Each piece status's glyph and theme key. */
+export const PIECE_GLYPHS: Record<BoardStatus, Seg> = {
+  todo: { text: '◌', color: SUBTLE },
+  doing: { text: '▸', color: PERMISSION },
+  done: { text: '✓', color: SUCCESS },
+  blocked: { text: '⊘', color: ERROR },
+  dropped: { text: '-', color: INACTIVE },
+}
+
+/** A request's pieces not dropped, in the order they were added. */
+export const requestPieces = (request: BoardRequest, nodes: readonly BoardNode[]) =>
+  request.pieces.flatMap(id => nodes.filter(one => one.id === id && one.status !== 'dropped'))
+
+/** A request's glyph: closed ✓, dropped -, ready ?, else ⊘ with a blocked piece, ▸ with a doing one, ◌ with neither. */
+export function requestGlyph(request: BoardRequest, nodes: readonly BoardNode[]): Seg {
+  const pieces = requestPieces(request, nodes)
+
+  if (request.state === 'closed' || request.state === 'dropped') {
+    return PIECE_GLYPHS[request.state === 'closed' ? 'done' : 'dropped']
+  }
+
+  if (request.state === 'ready') {
+    return { text: '?', color: WARNING }
+  }
+
+  return PIECE_GLYPHS[pieces.some(one => one.status === 'blocked') ? 'blocked' : pieces.some(one => one.status === 'doing') ? 'doing' : 'todo']
+}
+
+/** `<1m`, `12m`, `5h`, `3d`. */
+export const progressAge = (ms: number) =>
+  ms < 60_000 ? '<1m' : ms < 3_600_000 ? `${Math.floor(ms / 60_000)}m` : ms < DAY_MS ? `${Math.floor(ms / 3_600_000)}h` : `${Math.floor(ms / DAY_MS)}d`
+
+/** `14:32`, local. */
+export function clockOf(at: number): string {
+  const date = new Date(at)
+
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
+/** `▰▰▰▱▱ 3/5`: a cell per counted piece, done ones filled, at most ROLLUP_CELLS. Empty with no counted piece. */
+export function rollupText(request: BoardRequest): string {
+  if (request.total === 0) {
+    return ''
+  }
+
+  const cells = Math.min(request.total, ROLLUP_CELLS)
+  const filled = request.total <= ROLLUP_CELLS ? request.done : Math.round((request.done * ROLLUP_CELLS) / request.total)
+
+  return `${'▰'.repeat(filled)}${'▱'.repeat(cells - filled)} ${request.done}/${request.total}`
+}
+
+/** The age column's segments: the age right-aligned in AGE_COLUMNS, `!` in warning after it when `isStale`. */
+const ageSegs = (ms: number, isStale: boolean): Line => [
+  { text: alignRight(progressAge(ms), AGE_COLUMNS - (isStale ? 1 : 0)) },
+  ...(isStale ? [{ text: '!', color: WARNING }] : []),
+]
+
+/** `今天`, `昨天`, else `MM-DD` of the local day `at` falls on. */
+function dayLabel(at: number, now: number): string {
+  const yesterday = new Date(now)
+
+  yesterday.setDate(yesterday.getDate() - 1)
+
+  return dayOf(at) === dayOf(now) ? t().progressToday : dayOf(at) === dayOf(yesterday.getTime()) ? t().progressYesterday : dayOf(at).slice(5)
+}
+
+/** A lane's letter per name: its first ASCII letter upper-cased, else the first of A–Z no lane before took. */
+function laneLetters(names: readonly string[]): string[] {
+  const taken = new Set<string>()
+
+  return names.map(name => {
+    const first = /[A-Za-z]/.exec(name)?.[0]?.toUpperCase()
+    const letter = first !== undefined && !taken.has(first) ? first : [...'ABCDEFGHIJKLMNOPQRSTUVWXYZ'].find(one => !taken.has(one))!
+
+    taken.add(letter)
+
+    return letter
+  })
+}
+
+/** Nodes recorded before requests, not dropped, newest first; at the same time in the groups' order. */
+export const legacyNodes = (nodes: readonly BoardNode[]) =>
+  nodes
+    .filter(one => one.request === '' && one.status !== 'dropped')
+    .sort((a, b) => b.updatedAt - a.updatedAt || PROGRESS_ORDER.indexOf(a.status) - PROGRESS_ORDER.indexOf(b.status))
+
+/** A legacy node's lines: its status and title, its metadata and done_when dim beneath. */
+function nodeLines(node: BoardNode, nodes: readonly BoardNode[], columns: number, now: number): Line[] {
+  const isStale = staleHours(node, now) !== null
+  const doneWhen = progressDoneWhen(node)
+
+  return [
+    fitLine([{ text: t().progressStatuses[node.status], color: progressColor(node, now), bold: true }, { text: ` ${node.title}`, ...(isStale && { color: INACTIVE }) }], columns),
+    [{ text: fit(`  ${progressMeta(node, nodes, now)}`, columns), dim: true }],
+    ...(doneWhen === null ? [] : [[{ text: fit(`  ${doneWhen}`, columns), dim: true }]]),
+  ]
+}
+
+type ProgressRow = { kind: 'day'; label: string } | { kind: 'request'; request: BoardRequest } | { kind: 'piece'; request: BoardRequest; node: BoardNode } | { kind: 'more'; request: BoardRequest; count: number }
+
+/**
+ * The progress page as lines: a head with the project, the requests' counts by state and the time; the lanes' legend; the requests
+ * newest first under day separators, each in its line's lane, an open one's pieces under it; closed ones a week old folded; then the
+ * nodes recorded before requests.
+ */
+export function progressLines(board: BoardRead | null, columns: number, now: number): Line[] {
+  const nodes = board?.nodes ?? []
+  const requests = (board?.requests ?? []).filter(one => one.state !== 'dropped').sort((a, b) => b.updatedAt - a.updatedAt)
+  const legacy = legacyNodes(nodes)
+
+  if (requests.length === 0 && nodes.length === 0) {
     return [[{ text: fit(t().progressEmpty(board?.dir ?? null), columns), dim: true }]]
   }
 
-  return progressGroups(nodes).flatMap(group => [
-    [{ text: fit(`${t().progressStatuses[group.status]} · ${group.nodes.length}`, columns), bold: true }],
-    ...group.nodes.flatMap((node): Line[] => [
-      fitLine([{ text: t().progressStatuses[node.status], color: PROGRESS_COLORS[node.status], bold: true }, { text: ` ${node.title}` }], columns),
-      [{ text: fit(`  ${progressMeta(node, nodes)}`, columns), dim: true }],
-    ]),
-  ])
+  const isFolded = (one: BoardRequest) => one.state === 'closed' && now - one.updatedAt >= CLOSED_SHOWN_MS
+  const shown = requests.filter(one => !isFolded(one))
+  const onPage = (board?.lines ?? []).filter(line => shown.some(one => one.line === line.id)).sort((a, b) => b.updatedAt - a.updatedAt)
+  const laned = onPage.slice(0, LANES)
+  const others = onPage.length - laned.length
+  const otherSlot = others > 0 ? laned.length : -1
+  const slotOf = (one: BoardRequest) => {
+    const lane = laned.findIndex(line => line.id === one.line)
+
+    return lane >= 0 ? lane : otherSlot >= 0 && onPage.some(line => line.id === one.line) ? otherSlot : -1
+  }
+  // A request of no line, or of a line not on the page, takes the last slot, which draws no bar.
+  const noneSlot = shown.some(one => slotOf(one) === -1) ? laned.length + (others > 0 ? 1 : 0) : -1
+  const slots = laned.length + (others > 0 ? 1 : 0) + (noneSlot >= 0 ? 1 : 0)
+  const slotFor = (one: BoardRequest) => (slotOf(one) === -1 ? noneSlot : slotOf(one))
+
+  const rows: ProgressRow[] = []
+  let day = ''
+
+  for (const request of shown) {
+    const label = dayLabel(request.updatedAt, now)
+
+    if (label !== day) {
+      rows.push({ kind: 'day', label })
+      day = label
+    }
+
+    rows.push({ kind: 'request', request })
+
+    if (request.state === 'open' || request.state === 'ready' || request.state === 'stale') {
+      const pieces = requestPieces(request, nodes)
+
+      // The newest pieces stay in view: they are the ones under way.
+      if (pieces.length > LISTED_PIECES) {
+        rows.push({ kind: 'more', request, count: pieces.length - LISTED_PIECES })
+      }
+
+      rows.push(...pieces.slice(-LISTED_PIECES).map((node): ProgressRow => ({ kind: 'piece', request, node })))
+    }
+  }
+
+  const spans = Array.from({ length: slots }, (_, slot) => {
+    const at = rows.flatMap((row, i) => (row.kind === 'request' && slot !== noneSlot && slotFor(row.request) === slot ? [i] : []))
+
+    return { first: at[0] ?? -1, last: at.at(-1) ?? -1 }
+  })
+  const prefix = (i: number, glyph: Seg | null, slot: number): Line =>
+    spans.flatMap((span, lane): Line => {
+      if (lane === slot && glyph !== null) {
+        return [glyph, { text: ' ' }]
+      }
+
+      return [i > span.first && i < span.last ? { text: '| ', dim: true } : { text: '  ' }]
+    })
+  // The title, then the right-hand parts flush with the edge.
+  const edge = (head: Line, title: string, right: Line): Line => {
+    const rightW = lineWidth(right)
+    const text = fit(title, columns - lineWidth(head) - (rightW > 0 ? rightW + 2 : 0))
+    const gap = rightW > 0 ? ' '.repeat(Math.max(2, columns - lineWidth(head) - widthOf(text) - rightW)) : ''
+
+    return fitLine([...head, { text }, ...(gap === '' ? [] : [{ text: gap }]), ...right], columns)
+  }
+
+  const drawn = rows.map((row, i): Line => {
+    if (row.kind === 'day') {
+      const text = `-- ${row.label} `
+
+      return [{ text: fit(`${text}${'-'.repeat(Math.max(0, columns - widthOf(text)))}`, columns), dim: true }]
+    }
+
+    const slot = slotFor(row.request)
+
+    if (row.kind === 'request') {
+      const { request } = row
+      const rollup = request.state === 'closed' ? (request.total === 0 ? '' : `${request.done}/${request.total}`) : `${rollupText(request)}${request.followUps > 0 ? ` +${request.followUps}` : ''}`.trim()
+      const right: Line = [
+        ...(rollup === '' ? [] : [{ text: `${rollup}  ` }]),
+        ...(request.state === 'ready' ? [{ text: t().progressAwaiting, color: WARNING }, { text: '  ' }] : []),
+        ...ageSegs(now - request.updatedAt, request.state === 'stale'),
+      ]
+
+      return edge(prefix(i, requestGlyph(request, nodes), slot), request.title, right)
+    }
+
+    const head: Line = [...prefix(i, null, slot), { text: '↳ ' }]
+
+    if (row.kind === 'more') {
+      return fitLine([...head, { text: `… ${t().moreItems(row.count)}` }], columns)
+    }
+
+    const { node } = row
+    const time = node.status === 'todo' ? ' '.repeat(5) : clockOf(node.updatedAt)
+    const isQuiet = staleHours(node, now) !== null
+    const right: Line = [
+      ...(node.commit === null ? [] : [{ text: node.commit, dim: true }]),
+      ...(isQuiet ? [...(node.commit === null ? [] : [{ text: '  ' }]), ...ageSegs(now - node.updatedAt, true)] : []),
+    ]
+
+    return edge([...head, PIECE_GLYPHS[node.status], { text: ` ${time} ` }], node.title, right)
+  })
+
+  const count = (state: BoardRequest['state'], glyph: Seg): Line => {
+    const n = requests.filter(one => one.state === state && (state !== 'closed' || !isFolded(one))).length
+
+    return n === 0 ? [] : [glyph, { text: `${n}` }]
+  }
+  const counts = [count('open', PIECE_GLYPHS.doing), count('ready', { text: '?', color: WARNING }), count('stale', { text: '!', color: WARNING }), count('closed', PIECE_GLYPHS.done)].filter(part => part.length > 0)
+  const time = `${dayOf(now).slice(5)} ${clockOf(now)}`
+  const head: Line = [
+    ...(board === null || board.name === '' ? [] : [{ text: board.name, bold: true }, { text: '   ' }]),
+    ...counts.flatMap((part, i) => (i === 0 ? part : [{ text: ' ' }, ...part])),
+  ]
+  const legend = laneLetters(laned.map(line => line.name))
+    .map((letter, i) => `${letter}=${laned[i]!.name}`)
+    .concat(others > 0 ? [`~ ${t().moreItems(others)}`] : [])
+    .join('  ')
+
+  return [
+    fitLine([...head, { text: ' '.repeat(Math.max(2, columns - lineWidth(head) - widthOf(time))) }, { text: time, dim: true }], columns),
+    ...(legend === '' ? [] : [[{ text: fit(legend, columns), dim: true }]]),
+    ...drawn,
+    ...(requests.length > shown.length ? [[{ text: fit(t().progressMoreClosed(requests.length - shown.length), columns), dim: true }]] : []),
+    ...(legacy.length === 0
+      ? []
+      : [
+          [{ text: fit(`${t().progressNoRequest} · ${legacy.length}`, columns), bold: true }],
+          ...legacy.slice(0, LISTED_LEGACY).flatMap(node => nodeLines(node, nodes, columns, now)),
+          ...(legacy.length > LISTED_LEGACY ? [[{ text: fit(t().moreItems(legacy.length - LISTED_LEGACY), columns), dim: true }]] : []),
+        ]),
+  ]
 }

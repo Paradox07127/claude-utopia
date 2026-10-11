@@ -191,15 +191,21 @@ const TAIL_5M = tailOf(reply(900, 0), reply(0, 900), JSON.stringify({ type: 'use
 const TAIL_1H = tailOf(reply(0, 900), reply(934, 0))
 
 // The engine beneath the plugin for idle compaction: the context holds `tokens`, the transcript ends in `tail`
-// (null: the tail fails); counts compactions, toasts and tails.
-const idleWorld = (on: On, tokens: number, tail: string | null = '') => {
-  const seen = { compacts: 0, toasts: [] as string[], tails: [] as string[][] }
+// (null: the tail fails); a headless session refuses $.session.compact and compacts through /compact.
+// Counts compactions, /compact runs, toasts and tails.
+const idleWorld = (on: On, tokens: number, tail: string | null = '', headless = false) => {
+  const seen = { compacts: 0, commands: 0, toasts: [] as string[], tails: [] as string[][] }
   on('settings.read', () => ({ value: {} }))
   on('env.get', () => ({ value: undefined }))
   on('session.usage', () => ({ value: { startedAt: NOW, context: { tokens, window: 1_000_000 }, rateLimits: {} } }) as never)
   on('session.compact', () => {
+    if (headless) throw new Error('$.session.compact: not available in a headless (-p / SDK) session yet')
     seen.compacts += 1
     return { messages: [{ role: 'user' as const, text: 'summary', toolUses: [] }] }
+  })
+  on('command.run', ($, e) => {
+    if (e.command === 'compact') seen.commands += 1
+    return {}
   })
   on('ui.toast', ($, e) => {
     seen.toasts.push(e.text)
@@ -247,6 +253,24 @@ describe('idle compaction', () => {
     expect(seen.toasts).toEqual(['Idle near cache expiry: context compacted'])
     await clock.advance(3 * 60 * MINUTE)
     expect(seen.compacts).toBe(1)
+  })
+
+  test('a headless session that refuses $.session.compact compacts through /compact, with a toast', async ($, on) => {
+    const { seen, clock } = idleWorld(on, 150_000, TAIL_1H, true)
+    await mainTurn($)
+    await clock.advance(50 * MINUTE)
+    expect(seen.commands).toBe(1)
+    expect(seen.toasts).toEqual(['Idle near cache expiry: context compacted'])
+    await clock.advance(3 * 60 * MINUTE)
+    expect(seen.commands).toBe(1)
+  })
+
+  test('a session whose $.session.compact works runs no /compact', async ($, on) => {
+    const { seen, clock } = idleWorld(on, 150_000, TAIL_1H)
+    await mainTurn($)
+    await clock.advance(50 * MINUTE)
+    expect(seen.compacts).toBe(1)
+    expect(seen.commands).toBe(0)
   })
 
   test('a 5m cache leaves a context under 200k alone', async ($, on) => {
