@@ -335,7 +335,7 @@ expect("函数 hook 不挂 tool.call", any("tool.call" in l for l in hook_lines)
 
 
 def tool_call_violations(source):
-    """源码里会碰到 Bash 的 on('tool.call', …) 和 on('*', …)。matcher 的 tool 只认字面量字符串(或其数组)且不含 Bash。"""
+    """源码里会碰到 Bash 的 on('tool.call', …) 和 on('*', …)。matcher 的 tool 只认字面量字符串(或其数组)且不含 Bash,或匹配不到 Bash 的正则字面量。"""
     found = []
     for m in re.finditer(r"""\bon\(\s*(['"])(tool\.call|\*)\1\s*""", source):
         call = source[m.start():source.find("\n", m.start())]
@@ -353,6 +353,16 @@ def tool_call_violations(source):
                 break
         tool = re.search(r"\btool\s*:\s*(.*)", rest[start + 1:i], re.S)
         value = tool.group(1).lstrip() if tool else ""
+        # 正则字面量:能匹配 "Bash" 或 Python 编译不了的都算违规
+        rx = re.match(r"/((?:\\.|[^/\\\n])+)/([a-z]*)", value)
+        if rx:
+            try:
+                hits = re.search(rx.group(1), "Bash", re.I if "i" in rx.group(2) else 0) is not None
+            except re.error:
+                hits = True
+            if hits:
+                found.append(f"tool.call 可能匹配 Bash: {call}")
+            continue
         if value.startswith("["):
             items = value[1:value.find("]")].split(",")
         else:
@@ -382,6 +392,9 @@ for hostile in ["on('tool.call', { tool: 'Bash' }, async ($, e, next) => next())
                 "on('*', h)"]:
     got = tool_call_violations(f"export default ({{ on }}) => {{\n  {hostile}\n}}\n")
     expect(f"#92533 对照判违规 [{hostile}]", len(got), 1)
+for matcher, want in [("/^mcp__(?:dashboard|progress)__progress_plan$/", 0), ("/bash/i", 1), ("/(/", 1)]:
+    got = tool_call_violations(f"export default ({{ on }}) => {{\n  on('tool.call', {{ tool: {matcher} }}, h)\n}}\n")
+    expect(f"#92533 正则 matcher {matcher}", len(got), want)
 for name, want in [("'mcp__dashboard__open_progress'", 0), ("'Bash'", 1), ("`Bash`", 1)]:
     got = tool_call_violations(f"const TOOL = {name}\nexport default ({{ on }}) => {{\n  on('tool.call', {{ tool: TOOL }}, h)\n}}\n")
     expect(f"#92533 同文件常量 TOOL = {name}", len(got), want)

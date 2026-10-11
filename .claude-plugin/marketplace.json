@@ -1,7 +1,7 @@
 {
   "name": "claude-utopia",
   "owner": { "name": "Paradox07127" },
-  "description": "Claude Code mods and plugins: a status band and workbench, a progress board, multi-model code review, and guardrails. Under active development.",
+  "description": "Claude Code mods and plugins: a status band and workbench, a progress board, next-prompt prediction, multi-model code review, and guardrails. Under active development.",
   "plugins": [
     {
       "name": "dashboard",
@@ -17,6 +17,11 @@
       "name": "mm",
       "source": "./plugins/mm",
       "description": "Multi-model cross review and task dispatch: /mm:review and /mm:run, backed by mmrun."
+    },
+    {
+      "name": "next-prompt",
+      "source": "./plugins/next-prompt",
+      "description": "Next-prompt prediction: after each main-thread turn, a fork of the session's own model predicts your next message and shows it as the prompt box's suggestion, Tab to take; /prediction-stats reports how often it was taken."
     },
     {
       "name": "progress",

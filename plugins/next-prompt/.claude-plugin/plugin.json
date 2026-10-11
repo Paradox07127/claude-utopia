@@ -1,0 +1,6 @@
+{
+  "name": "next-prompt",
+  "version": "0.1.0",
+  "description": "Next-prompt prediction: after each main-thread turn, a fork of the session's own model predicts your next message and shows it as the prompt box's suggestion, Tab to take; /prediction-stats reports how often it was taken",
+  "author": { "name": "Paradox07127" }
+}

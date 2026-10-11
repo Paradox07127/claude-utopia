@@ -4,13 +4,14 @@
 
 [简体中文](README.zh-CN.md)
 
-Four Claude Code plugins built on [mods](https://code.claude.com/docs/en/plugins/mods/overview) (function hooks), plus two agent templates.
+Five Claude Code plugins built on [mods](https://code.claude.com/docs/en/plugins/mods/overview) (function hooks), plus two agent templates.
 
 | Plugin | What it does |
 |---|---|
 | `dashboard` | A status band above the prompt for running subagents and mmrun reviews, a line under the prompt with context use and the tightest rate-limit window, and a seven-page workbench (Overview / Agents / Reviews / GPU / Timeline / Usage / Progress) opened with `/dashboard`, `/subagents`, `/mmrun`, `/gpu`, `/timeline`. The Reviews, GPU and Progress tabs show once they have data: an `~/.claude/mmruns` folder, a GPU host, a progress board. The Timeline page draws the main loop's turns as a waterfall of model requests and tool calls, with a hotspot view of the slowest tools and turns. Renders subagent cards, test summaries and blocked-command notices in the transcript. |
 | `harness` | Skills: `ai-code-cleanup`, `interrogate`, `shape-task`, `verify-change`, `setup`. Guards: refuse subagents on blocked models, refuse git commands that discard uncommitted work in the shared main worktree, refuse tool calls that would print API-key config files (`~/.claude.json` and its backups, Claude settings, Codex config and auth, grok auth, OpenViking config) or an environment dump (`env`, `printenv`, `export -p`, `set`, …) into the transcript, run `/compact` when the main thread idles until the prompt cache is about to expire. |
 | `mm` | Cross-model code review and delegation: `/mm:review` runs codex / grok / agy in parallel as read-only reviewers, `/mm:run` hands a task to another model in its own worktree. Ships the `mmrun` CLI. A guard refuses reading mmrun's `*.raw` event streams (except a lone `tail` of 50 lines or fewer) and moves a foreground `mmrun wait` to the background. |
+| `next-prompt` | Predicts your next message. After each main-thread turn, one fork of the session's own model (reusing its prompt cache, no tools, nothing written to the transcript) writes the message you are likely to send next; it shows as the prompt box's dim suggestion, Tab to take. A reply of `NONE` shows nothing. `/prediction-stats` prints how many were taken or near-taken, the characters kept, the abstentions, the median fork time and the cache share. Hides Claude Code's own suggestion in the terminal; in the desktop app set `"promptSuggestionEnabled": false`. One fork per turn, billed to your session. |
 | `progress` | A per-project progress board. After each turn you typed that changed files or made a commit, the plugin asks Sonnet to record the work as 1–3 nodes (title, summary, status, kind, links to earlier nodes); the main model spends no tokens on it. The board is kept under `~/.claude/progress/` or committed with the project, as you choose once per project. The plugin mirrors the board to an optional Artifact canvas. Works without `dashboard`; with it, the workbench's Progress page lists the board. |
 | `agents/` | `worker` and `researcher` subagent templates to copy into `~/.claude/agents/`. |
 
@@ -61,6 +62,10 @@ claude plugin install mm@claude-utopia
 ```
 
 ```bash
+claude plugin install next-prompt@claude-utopia
+```
+
+```bash
 claude plugin install progress@claude-utopia
 ```
 
@@ -85,7 +90,7 @@ Set with `/plugin configure <plugin>@claude-utopia`, or `claude plugin configure
 | harness | `idleCompact` | `true` | When the main thread sits idle until just before the prompt cache expires, run `/compact` automatically: with a 1h cache 10 minutes before, at 100k tokens or more; with a 5m cache 1 minute before, at 200k or more. The TTL is read from the transcript. |
 | mm | `reviewModels` | `codex,grok` | Models `/mm:review` uses when no `--models` is given. |
 
-`progress` has no options.
+`next-prompt` and `progress` have no options.
 
 Skills, command docs and every instruction the plugins send to the model are in English; skill descriptions also carry Chinese trigger words so Chinese prompts match them. Claude replies in your language. Only the drawn UI follows `language`.
 

@@ -29,6 +29,7 @@ import {
   parseBoardEvents,
   parseNodesReply,
   parseOpsReply,
+  isBoardOff,
   parseStorage,
   pastCorrections,
   pathKeys,
@@ -212,27 +213,28 @@ function bashOutput(output: unknown): string | null {
   return typeof out.stderr === 'string' ? `${out.stdout}\n${out.stderr}` : out.stdout
 }
 
-/** The person's choice of where the project's board lives, kept in its config; null when dismissed, answered otherwise, or dismissed before. */
+/** The person's choice of where the project's board lives, kept in its config; null when dismissed, off, answered otherwise, or dismissed before. */
 async function askStorage($: EngineInterface, project: string, root: string): Promise<BoardStorage | null> {
-  if (isStorageDeclined) {
+  const home = (await $.env.get('HOME')) ?? ''
+  const configPath = `${boardDir(home, project)}/config.json`
+  const config = String(await $.fs.read(configPath).catch(() => ''))
+
+  if (isStorageDeclined || isBoardOff(config)) {
     return null
   }
 
-  const question = `Each typed turn that changes files, and each turn that makes a commit, is recorded on this project's progress board. local keeps it in ${boardDir('~', project)}/events/, private to this machine; git keeps it in ${root}/.notes/board/events/, committed with the project. Where should it be kept?`
-  const answer = await $.ui.ask(question, { options: ['local', 'git'], header: 'Progress' }).catch(() => null)
+  const question = `Each typed turn that changes files, and each turn that makes a commit, is recorded on this project's progress board. local keeps it in ${boardDir('~', project)}/events/, private to this machine; git keeps it in ${root}/.notes/board/events/, committed with the project; off records nothing and does not ask again (remove "storage" from ${boardDir('~', project)}/config.json to be asked again). Where should it be kept?`
+  const answer = await $.ui.ask(question, { options: ['local', 'git', 'off'], header: 'Progress' }).catch(() => null)
 
-  if (answer !== 'local' && answer !== 'git') {
+  if (answer !== 'local' && answer !== 'git' && answer !== 'off') {
     isStorageDeclined = true
 
     return null
   }
 
-  const home = (await $.env.get('HOME')) ?? ''
-  const configPath = `${boardDir(home, project)}/config.json`
+  await $.fs.write(configPath, JSON.stringify({ ...jsonOf(config), storage: answer }))
 
-  await $.fs.write(configPath, JSON.stringify({ ...jsonOf(await $.fs.read(configPath).catch(() => '')), storage: answer }))
-
-  return answer
+  return answer === 'off' ? null : answer
 }
 
 /**
@@ -706,6 +708,12 @@ export const register: Register = on => {
     await $.command
       .register({ name: 'progress-line', description: 'Put a request of the progress board in a line, or in a new line by name', argumentHint: '<request id> <line id> | <request id> new <name>' })
       .catch((error: unknown) => $.ui.log(`progress: cannot register /progress-line: ${String(error)}`, { to: 'debug' }))
+    const home = (await $.env.get('HOME')) ?? ''
+
+    if (isBoardOff(String(await $.fs.read(`${boardDir(home, projectKey(await ledgerRoot($)))}/config.json`).catch(() => '')))) {
+      return next(e)
+    }
+
     await $.tool.register(PLAN_TOOL).catch((error: unknown) => $.ui.log(`progress: cannot register the ${PLAN_TOOL.name} tool: ${String(error)}`, { to: 'debug' }))
 
     // Queued, not awaited: the model call must not hold the session's start.
@@ -826,7 +834,7 @@ export const register: Register = on => {
 
   // On the recording chain too, so a plan never interleaves with a recording.
   // Its full name in the source tree, and in the split release where the recorder is plugin `progress`.
-  on('tool.call', { tool: ['mcp__dashboard__progress_plan', 'mcp__progress__progress_plan'] }, async ($, e) => {
+  on('tool.call', { tool: /^mcp__(?:dashboard|progress)__progress_plan$/ }, async ($, e) => {
     const answer = await onRecording(() => plan($, e as unknown as Readonly<Record<string, unknown>>))
 
     return 'error' in answer ? { deny: `progress_plan: nothing recorded: ${answer.error}` } : { result: [{ type: 'text' as const, text: answer.text }] }

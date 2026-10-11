@@ -1,6 +1,6 @@
 {
   "name": "harness",
-  "version": "0.4.17",
+  "version": "0.4.18",
   "description": "Skills and guard hooks: ai-code-cleanup, interrogate, shape-task, verify-change, setup, a shared-worktree git guard, and a guard against reading API-key config files",
   "author": { "name": "Paradox07127" },
   "types": "./types/index.d.ts",

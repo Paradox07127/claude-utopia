@@ -17,6 +17,7 @@ for t in git jq python3 ssh codex grok agy; do printf '%-8s %s\n' "$t" "$(comman
 - `harness` needs `python3` (its git guard runs before every Bash call, even when switched off).
 - `mm` needs `git`, `jq`, `python3` and at least one of `codex`, `grok`, `agy`. The grok and agy read-only fence needs macOS (`Darwin`); on other systems only `codex` can be used.
 - `progress` needs nothing extra.
+- `next-prompt` needs nothing extra.
 - `dashboard` needs nothing extra, except for GPU hosts: `ssh` that logs in without a prompt (key-based), and `nvidia-smi` or `tegrastats` on the host.
 
 If `git`, `jq` or `python3` is missing, tell the user which plugin needs it and ask them to install it. If none of the usable model CLIs is installed, tell the user `mm` will not work until one is, and ask whether to install the `mm` plugin anyway.
@@ -25,7 +26,7 @@ If `git`, `jq` or `python3` is missing, tell the user which plugin needs it and 
 
 Ask these in one message, with the defaults shown, and accept "defaults" as an answer:
 
-1. Which plugins to install: `dashboard`, `harness`, `mm`, `progress` (default: all four). `progress` is a per-project board; after each typed turn that changed files or made a commit, a Sonnet completion records the work; it has no options.
+1. Which plugins to install: `dashboard`, `harness`, `mm`, `progress`, `next-prompt` (default: all five). `progress` is a per-project board; after each typed turn that changed files or made a commit, a Sonnet completion records the work; it has no options. `next-prompt` predicts the user's next message after each turn and shows it as the prompt box's suggestion, one fork of the session per turn; it has no options. For the desktop app, also tell the user to set `promptSuggestionEnabled` to `false` in their Claude Code user settings, as the desktop app cannot hide Claude Code's own suggestion.
 2. UI language for `dashboard` and `harness`: `auto` (follow Claude Code's language setting and the system locale), `zh-CN` or `en` (default `auto`).
 3. `harness`: model names to refuse for subagents, comma-separated (default empty, which allows all); whether to guard the shared main worktree against git commands that discard uncommitted work (default yes); whether to run `/compact` automatically when the main thread idles until just before the prompt cache expires (1h cache: 10 minutes before, at 100k tokens or more; 5m cache: 1 minute before, at 200k or more; the TTL is read from the transcript) (default yes).
 4. `mm`: models `/mm:review` uses by default, from the usable CLIs found in step 1 (suggest `codex,grok`, minus any that are missing or unusable).
@@ -94,6 +95,7 @@ Then tell the user to start a new Claude Code session so the plugins and options
 - `harness`: `/harness:setup` is listed in the `/` menu.
 - `mm`: `mmrun` with no arguments prints its usage from the Bash tool.
 - `progress`: in a project with no board yet, the first typed turn that edits a file ends with a question of where to keep the board.
+- `next-prompt`: after a reply, the prompt box shows a suggested next message; `/prediction-stats` prints its statistics once a shown suggestion has been followed by a typed prompt.
 
 ## Changing settings later
 

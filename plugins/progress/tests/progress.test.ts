@@ -490,6 +490,38 @@ describe('recording a turn: where the board is kept', () => {
     expect(world.requests).toEqual([])
     expect(written(world)).toEqual([])
   })
+
+  test('off: the choice is kept, nothing written, no model asked, and the next turn does not ask again', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    const world = seat(on, clock)
+
+    world.storage = 'off'
+    world.replies = [reply(PAGE_NODE), reply(PAGE_NODE)]
+    await $.session.start(SESSION)
+    await turn($, clock, world)
+    await turn($, clock, world, { turnId: 't2' })
+
+    expect(world.asks.length).toBe(1)
+    expect(world.asks[0]).toContain(CONFIG.replace(/^\/h/, '~'))
+    expect(JSON.parse(world.files[CONFIG] ?? 'null')).toEqual({ storage: 'off' })
+    expect(world.requests).toEqual([])
+    expect(written(world)).toEqual([CONFIG])
+  })
+
+  test('a config of storage off: no question, no progress_plan tool, no consolidation, nothing recorded', async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    const world = seat(on, clock)
+
+    world.files[CONFIG] = JSON.stringify({ storage: 'off' })
+    world.replies = [reply(PAGE_NODE)]
+    await $.session.start(SESSION)
+    await turn($, clock, world)
+
+    expect(world.asks).toEqual([])
+    expect(world.tools).not.toContain('progress_plan')
+    expect(world.requests).toEqual([])
+    expect(written(world)).toEqual([CONFIG])
+  })
 })
 
 describe('recording a turn: the canvas', () => {

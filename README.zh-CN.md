@@ -4,13 +4,14 @@
 
 [English](README.md)
 
-基于 [mods](https://code.claude.com/docs/en/plugins/mods/overview)（function hooks）的四个 Claude Code 插件，外加两个 agent 模板。
+基于 [mods](https://code.claude.com/docs/en/plugins/mods/overview)（function hooks）的五个 Claude Code 插件，外加两个 agent 模板。
 
 | 插件 | 做什么 |
 |---|---|
 | `dashboard` | 输入框上方的状态条，显示运行中的子 agent 和 mmrun 外审；输入框下方的一行，显示上下文用量和用得最多的额度窗口；七页工作台（总览 / Agents / 外审 / GPU / 时间线 / 用量 / 进度），用 `/dashboard`、`/subagents`、`/mmrun`、`/gpu`、`/timeline` 打开。外审、GPU、进度三个标签有数据时才显示：有 `~/.claude/mmruns` 目录、有 GPU 主机、有进度板。时间线页把主循环的每一轮画成模型请求和工具调用的瀑布图，另有热点视图列出最慢的工具和轮次。在对话里画子 agent 卡片、测试摘要和被拦命令的提示。 |
 | `harness` | skill：`ai-code-cleanup`、`interrogate`、`shape-task`、`verify-change`、`setup`。守卫：拒绝派指定模型的子 agent；在共享主工作树上拒绝会抹掉未提交改动的 git 命令；拒绝会把 API key 配置文件（`~/.claude.json` 及其备份、Claude 的设置、Codex 的配置与认证、grok 的认证、OpenViking 的配置）内容或环境变量全量输出（`env`、`printenv`、`export -p`、`set` 等）带进对话的工具调用；主线程空闲到 prompt 缓存将过期时自动 `/compact`。 |
 | `mm` | 多模型交叉审查与派活：`/mm:review` 让 codex / grok / agy 并行只读审查，`/mm:run` 把任务交给别的模型在独立工作树里做。自带 `mmrun` 命令行工具。守卫拒绝读取 mmrun 的 `*.raw` 事件流（单独一条不超过 50 行的 `tail` 除外），并把前台的 `mmrun wait` 改到后台运行。 |
+| `next-prompt` | 预测你的下一条消息。主线程每轮结束后，用会话自己的模型 fork 一次（复用它的 prompt 缓存，不带工具，不写进会话记录），写出你接下来最可能发的那条，显示成输入框里的灰色建议，按 Tab 采纳。回复 `NONE` 时什么都不显示。`/prediction-stats` 列出采纳和接近采纳的条数、保留的字数、放弃显示的次数、fork 耗时中位数和读自缓存的比例。在终端里隐藏 Claude Code 自带的建议；桌面版里请设 `"promptSuggestionEnabled": false`。每轮一次 fork，计入你的会话用量。 |
 | `progress` | 按项目的进度板。你手打的 prompt 所在的那一轮改了文件或产生了 commit 后，插件让 Sonnet 把这轮的工作记成 1–3 个节点（标题、摘要、状态、类型，连到旧节点），主模型不花 token。进度板存在 `~/.claude/progress/` 下或随项目提交，每个项目选一次。插件把进度板同步到可选的 Artifact 画布。不依赖 `dashboard`；装了 `dashboard` 时，工作台的进度页列出这块板。 |
 | `agents/` | `worker` 与 `researcher` 子 agent 模板，复制到 `~/.claude/agents/` 使用。 |
 
@@ -61,6 +62,10 @@ claude plugin install mm@claude-utopia
 ```
 
 ```bash
+claude plugin install next-prompt@claude-utopia
+```
+
+```bash
 claude plugin install progress@claude-utopia
 ```
 
@@ -85,7 +90,7 @@ claude plugin install progress@claude-utopia
 | harness | `idleCompact` | `true` | 主线程空闲到 prompt 缓存快过期时自动 `/compact`：1h 缓存在过期前 10 分钟、上下文不少于 100k token；5m 缓存在过期前 1 分钟、不少于 200k token。缓存时效从会话记录读取。 |
 | mm | `reviewModels` | `codex,grok` | `/mm:review` 没给 `--models` 时用的模型。 |
 
-`progress` 没有配置项。
+`next-prompt` 和 `progress` 没有配置项。
 
 skill、命令文档以及插件发给模型的指令都是英文；skill 的描述里另带中文触发词，让中文提问也能匹配上。Claude 会用你的语言回复。只有画出来的界面跟随 `language`。
 

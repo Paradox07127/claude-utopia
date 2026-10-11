@@ -150,6 +150,17 @@ export const eventsDir = (storage: BoardStorage, home: string, project: string, 
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 
+/** Whether a config.json turns the board off: the person chose off at the storage question. */
+export function isBoardOff(text: string): boolean {
+  try {
+    const raw: unknown = JSON.parse(text)
+
+    return isRecord(raw) && raw.storage === 'off'
+  } catch {
+    return false
+  }
+}
+
 /** The storage a config.json names; null when there is none or it names neither. */
 export function parseStorage(text: string): BoardStorage | null {
   try {
