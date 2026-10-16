@@ -2,8 +2,10 @@ import { describe, expect, test } from 'claude-code/testing'
 
 import type { AgentRun, DashSeen, GateRun, GpuWatch, MmSnapshot, SessionPresence, WorktreeInfo } from '../types'
 import { bandLines, boardOf, endedText, idleLine, overviewOf, peerToasts, pendingLine, runningLine, sessionLine } from '../hooks/board'
+import type { Line } from '../hooks/board'
 import { drawDesktopBand, drawDesktopPane } from '../hooks/desktop'
 import type { PaneData } from '../hooks/desktop'
+import type { BandRow } from '../hooks/desktop/band'
 import { setLang, t } from '../hooks/i18n'
 import type { Lang } from '../hooks/i18n'
 import { withClocks } from './clocks'
@@ -155,6 +157,9 @@ function stringsOf(node: unknown, out: string[] = []): string[] {
   return out
 }
 
+const BAND_ACTIONS = { onOpen: noop, onAsk: noop, onDismiss: noop }
+const bandRows = (lines: Line[]): BandRow[] => lines.map(line => ({ kind: 'line', line, tone: 'idle' }))
+
 /** Everything desktop.tsx draws and every line board.ts hands to the band, the overview and toasts, in one language. */
 function drawn(lang: Lang): string[] {
   setLang(lang)
@@ -166,11 +171,12 @@ function drawn(lang: Lang): string[] {
   const idle = { agents: [agent({ agentId: 'a4', state: 'done', answer: 'all done', ...ENDED })], snap: null, seen: { agents: NOW, runs: NOW }, peers: [], gates: [] }
 
   return stringsOf(withClocks([
-    drawDesktopBand(EL, [idleLine(undefined, undefined, NOW)], noop),
-    drawDesktopBand(EL, [idleLine(view.recent[0], GATES[1], NOW)], noop),
-    ...[1, 2, 3, 5].map(rows => drawDesktopBand(EL, bandLines(board, rows, 100), noop)),
-    drawDesktopBand(EL, bandLines(board, 2, 10), noop),
-    drawDesktopBand(EL, bandLines(boardOf([AGENTS[2]!], null, SEEN, NOW, GATES, [], cold), 5, 100), noop),
+    drawDesktopBand(EL, [{ kind: 'idle', line: idleLine(undefined, undefined, NOW) }], BAND_ACTIONS),
+    drawDesktopBand(EL, [{ kind: 'idle', line: idleLine(view.recent[0], GATES[1], NOW) }], BAND_ACTIONS),
+    ...[1, 2, 3, 5].map(rows => drawDesktopBand(EL, bandRows(bandLines(board, rows, 100)), BAND_ACTIONS)),
+    drawDesktopBand(EL, bandRows(bandLines(board, 2, 10)), BAND_ACTIONS),
+    drawDesktopBand(EL, bandRows(bandLines(boardOf([AGENTS[2]!], null, SEEN, NOW, GATES, [], cold), 5, 100)), BAND_ACTIONS),
+    drawDesktopBand(EL, [{ kind: 'ask', id: 'p1', head: 'mm ' + t().peerWords.permission, waited: t().askWaited('1m05s'), task: 'fix the band', request: 'Bash' }], BAND_ACTIONS),
     drawDesktopPane(EL, pane({})),
     drawDesktopPane(EL, pane({ ...idle, trees: null })),
     drawDesktopPane(EL, pane({ ...idle, trees: [] })),
@@ -213,8 +219,8 @@ describe('desktop and board strings', () => {
       '工作台',
       '关闭',
       '\n需要你\n',
-      '\n其他会话\n',
-      '\n运行中\n',
+      '其他会话 · ',
+      '运行中 · ',
       '已完成',
       '✓ 已返回 1',
       '⊘ 已中止 1',
@@ -227,7 +233,7 @@ describe('desktop and board strings', () => {
       '✗ 失败',
       // An age is a clock between the gate's words and 前.
       '\n前\n',
-      '主树 · ',
+      ' · 主树',
       '\n工作树\n',
       '另有 4 项',
       '命令',
@@ -250,17 +256,21 @@ describe('desktop and board strings', () => {
       '此主机上没有 GPU。',
       '~ 还没有成功的采样',
       '前更新',
-      '~ 数据过期 · 上次成功',
-      '利用率 52%',
+      '前未更新',
+      '\n利用率\n',
+      '\n填入 /gpu\n',
+      '\n主机\n',
       '显存 18.2 / 24.0 GiB',
       '显存 N/A',
       '显存前 5 进程',
       '● 运行',
-      '✓ 已返回 · 未验收',
+      '\n已返回 · 未验收\n',
       '✗ 出错',
       '◐ 静默 3m00s',
       '✗ 被拒2',
       '已中止',
+      '\n待验收\n',
+      '\n中止\n',
       '拒答',
       '! 待处理',
       '待读',
@@ -281,7 +291,7 @@ describe('desktop and board strings', () => {
       '已复制',
       ' 前',
     ]) {
-      expect(text).toContain(part)
+      expect(text, part).toContain(part)
     }
   })
 })

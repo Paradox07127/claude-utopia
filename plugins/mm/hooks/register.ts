@@ -4,6 +4,7 @@ import type { EngineInterface, HookFailure, PromptSubmitResult, Register, Timer 
 import type { MmWatch } from '../types'
 import { cutOutputs, doneMessage, isFlagForm, splitArgs } from './args'
 import type { ModelResult } from './args'
+import { register as registerGuard } from './guard'
 
 const POLL_MS = 5000
 const RUN_LINE = /^RUN (\S+)/m
@@ -16,13 +17,15 @@ const SEGMENT_END = /&&|\|\||[;|\n]/
 const FOLLOW_UP = /^(NEXT|THEN) /
 const MMRUN_START = /\bmmrun\s+(review|run|start|ask)\b/
 const EXHAUSTIVE_TAG = /^tag=.*:(full|exhaustive)$/m
+const GROUP_LINE = /^group=(.*)$/m
 const CONTEXT_MAX = 32_000
 const MESSAGE_MAX = 16_000
 const RESULT_TRIES = 3
 // Finished runs took at most 2972 s (codex), p95 1904 s.
 const REMIND_MS = 60 * 60_000
 
-type Waiting = MmWatch & { message: string }
+/** `parts`: the watches of a split review's runs, when this one stands for all of them. */
+type Waiting = MmWatch & { message: string; parts?: Waiting[] }
 
 const watches = atom({ plugin: 'mm', key: 'watches' } as const, [] as MmWatch[])
 
@@ -49,7 +52,19 @@ function detach($: EngineInterface, what: string, work: () => Promise<unknown>):
   void work().catch((error: unknown) => $.ui.log(`mm: ${what} failed: ${String(error)}`, { to: 'debug' }))
 }
 
-/** Claims the messages of ended runs: removed from `watches` in one write, so each is handed to one taker. */
+/** Whether the run's message can go: a part of a split review waits until every watched part has its message. */
+function isReady(one: MmWatch, list: MmWatch[]): one is Waiting {
+  return (
+    one.message !== undefined &&
+    (one.group ?? []).every(rid => {
+      const part = list.find(other => other.rid === rid)
+
+      return part === undefined || part.message !== undefined
+    })
+  )
+}
+
+/** Claims the messages of ended runs: removed from `watches` in one write, so each is handed to one taker. The parts of a split review become one. */
 async function takeMessages($: EngineInterface): Promise<Waiting[]> {
   if (!(await read($, watches)).some(one => one.message !== undefined)) {
     return []
@@ -58,9 +73,9 @@ async function takeMessages($: EngineInterface): Promise<Waiting[]> {
   let taken: Waiting[] = []
 
   await update($, watches, list => {
-    taken = list.filter((one): one is Waiting => one.message !== undefined)
+    taken = list.filter(one => isReady(one, list))
 
-    return list.filter(one => one.message === undefined)
+    return list.filter(one => !taken.includes(one as Waiting))
   })
 
   // Emptied before the hand-over, so a reload or exit in between cannot leave a delivered run marked.
@@ -68,15 +83,35 @@ async function takeMessages($: EngineInterface): Promise<Waiting[]> {
     await mark($, watch.rid, false)
   }
 
-  return taken
+  const merged: Waiting[] = []
+
+  for (const one of taken) {
+    const group = one.group ?? []
+
+    if (group.length > 1 && one.rid === group.find(rid => taken.some(other => other.rid === rid))) {
+      const parts = group.map(rid => taken.find(other => other.rid === rid)).filter(part => part !== undefined)
+      const missing = group.filter(rid => !parts.some(part => part.rid === rid))
+      const head =
+        missing.length === 0
+          ? `mm plugin: /mm:review was split by files into ${group.length} parts (${group.join(', ')}); every part has ended, each result follows.`
+          : `mm plugin: /mm:review was split by files into ${group.length} parts (${group.join(', ')}); the results of ${parts.map(part => part.rid).join(', ')} follow. Not watched by this session: ${missing.join(', ')} (\`mmrun result <model> ${missing[0]}\` reads it).`
+
+      merged.push({ ...one, message: [head, ...parts.map(part => part.message)].join('\n\n'), parts })
+    }
+  }
+
+  // A run another's group holds goes out inside that group's message, even when its own run.meta named no group.
+  return [...merged, ...taken.filter(one => (one.group ?? []).length < 2 && !merged.some(group => group.parts?.includes(one)))]
 }
 
 /** Puts claimed messages back for the next poll or prompt, replacing a watch of the same run; not across a /clear since `at`. */
 async function putBack($: EngineInterface, taken: Waiting[], at: number): Promise<void> {
   if (taken.length > 0 && at === clears) {
-    await update($, watches, list => [...list.filter(one => !taken.some(back => back.rid === one.rid)), ...taken])
+    const back = taken.flatMap(one => one.parts ?? [one])
 
-    for (const watch of taken) {
+    await update($, watches, list => [...list.filter(one => !back.some(other => other.rid === one.rid)), ...back])
+
+    for (const watch of back) {
       await mark($, watch.rid, true)
     }
   }
@@ -119,7 +154,7 @@ async function home($: EngineInterface): Promise<string> {
   return (await $.env.get('HOME')) ?? ''
 }
 
-/** The text of a `watched` mark: the session id after the word limits guard.py's denial to this session. */
+/** The text of a `watched` mark: the session id after the word limits guard.ts's denial to this session. */
 async function watchedText($: EngineInterface): Promise<string> {
   try {
     return `watched ${await $.session.id()}\n`
@@ -128,7 +163,7 @@ async function watchedText($: EngineInterface): Promise<string> {
   }
 }
 
-/** Writes the run's `watched` mark, by which guard.py denies a main-thread `mmrun wait` on it; empty means not watched. */
+/** Writes the run's `watched` mark, by which guard.ts denies a main-thread `mmrun wait` on it; empty means not watched. */
 async function mark($: EngineInterface, rid: string, isWatched: boolean): Promise<void> {
   try {
     await $.fs.write(`${await home($)}/.claude/mmruns/${rid}/watched`, isWatched ? await watchedText($) : '')
@@ -217,9 +252,16 @@ async function isExhaustiveRun($: EngineInterface, rid: string): Promise<boolean
   return EXHAUSTIVE_TAG.test((await readText($, `${await home($)}/.claude/mmruns/${rid}/run.meta`)) ?? '')
 }
 
-/** The results with a message within MESSAGE_MAX: a review's read again `--top --oneline` first, then each output cut to an equal share. */
-async function boundResults($: EngineInterface, mmrun: string, watch: MmWatch, results: ModelResult[], isExhaustive: boolean): Promise<ModelResult[]> {
-  const fits = (list: ModelResult[]) => doneMessage(watch.kind, watch.rid, list, watch.seen, isExhaustive).length <= MESSAGE_MAX
+/** The runs of the split review run.meta names the run a part of; empty for an unsplit run. */
+async function groupOf($: EngineInterface, rid: string): Promise<string[]> {
+  const group = (GROUP_LINE.exec((await readText($, `${await home($)}/.claude/mmruns/${rid}/run.meta`)) ?? '')?.[1] ?? '').split(',').filter(one => one !== '')
+
+  return group.length > 1 ? group : []
+}
+
+/** The results with a message within `max`: a review's read again `--top --oneline` first, then each output cut to an equal share. */
+async function boundResults($: EngineInterface, mmrun: string, watch: MmWatch, results: ModelResult[], isExhaustive: boolean, max: number): Promise<ModelResult[]> {
+  const fits = (list: ModelResult[]) => doneMessage(watch.kind, watch.rid, list, watch.seen, isExhaustive).length <= max
 
   if (fits(results)) {
     return results
@@ -241,7 +283,7 @@ async function boundResults($: EngineInterface, mmrun: string, watch: MmWatch, r
     }
   }
 
-  return cutOutputs(watch.kind, watch.rid, bounded, watch.seen ?? [], isExhaustive, MESSAGE_MAX)
+  return cutOutputs(watch.kind, watch.rid, bounded, watch.seen ?? [], isExhaustive, max)
 }
 
 /** One pass over the watches: queues the message of each run whose models have all ended, then forgets it. */
@@ -301,13 +343,18 @@ async function pollWatches($: EngineInterface): Promise<void> {
       }
 
       const isExhaustive = ended !== null && watch.kind === 'review' && (await isExhaustiveRun($, watch.rid))
-      const results = ended === null ? null : await boundResults($, mmrun, watch, ended, isExhaustive)
+      const group = ended !== null && watch.kind === 'review' ? await groupOf($, watch.rid) : []
+      // The parts of a split review go out as one message: each gets its share, less room for the joined message's header.
+      const max = group.length > 1 ? Math.floor(MESSAGE_MAX / group.length) - 300 : MESSAGE_MAX
+      const results = ended === null ? null : await boundResults($, mmrun, watch, ended, isExhaustive, max)
 
       await update($, watches, list =>
         results === null
           ? list.filter(one => one.rid !== watch.rid)
           : list.map(one =>
-              one.rid === watch.rid ? { ...one, results, message: doneMessage(one.kind, one.rid, results, one.seen, isExhaustive) } : one,
+              one.rid === watch.rid
+                ? { ...one, results, message: doneMessage(one.kind, one.rid, results, one.seen, isExhaustive), ...(group.length > 0 && { group }) }
+                : one,
             ),
       )
     }
@@ -323,8 +370,13 @@ async function pollWatches($: EngineInterface): Promise<void> {
 /** Records the models of watched runs whose ended result the segments (of a Bash command, or a Read path) read, and rebuilds a waiting message without them. */
 async function noteRead($: EngineInterface, segments: string[]): Promise<void> {
   const list = await read($, watches)
-  // Rids sort by start time; `mmrun result`/`report` without one reads the latest run.
-  const latest = list.reduce((max, one) => (one.rid > max ? one.rid : max), '')
+  const first = list[0]
+  // `mmrun result`/`report` without a rid reads mmrun's latest run of the session, which may be a delivered run no longer in `watches`.
+  const session =
+    first !== undefined && segments.some(segment => READ_LATEST.test(segment) && !RID_SHAPED.test(segment))
+      ? (/^session=(.+)$/m.exec((await readText($, `${await home($)}/.claude/mmruns/${first.rid}/run.meta`)) ?? '')?.[1] ?? '')
+      : ''
+  const latest = session === '' ? '' : ((await readText($, `${await home($)}/.claude/mmruns/.latest-${session}`))?.trim() ?? '')
 
   for (const watch of list) {
     const own = segments.filter(segment => segment.includes(watch.rid) || (watch.rid === latest && READ_LATEST.test(segment) && !RID_SHAPED.test(segment)))
@@ -388,7 +440,9 @@ function ensurePoller($: EngineInterface): void {
 async function start($: EngineInterface, kind: MmWatch['kind'], words: string[], reviewModels: string): Promise<{ text: string; context?: string[] }> {
   const models = kind === 'review' && reviewModels !== '' && !words.includes('--models') ? ['--models', reviewModels] : []
   const dir = words.includes('--dir') ? [] : ['--dir', await $.session.root()]
-  const r = await $.process.run([`${$.plugin.root}/bin/mmrun`, kind, ...words, ...models, ...dir])
+  // mmrun writes it into <model>.events.jsonl; a Bash-started mmrun has it from the engine, this child process does not.
+  const sid = await $.session.id().catch(() => null)
+  const r = await $.process.run([`${$.plugin.root}/bin/mmrun`, kind, ...words, ...models, ...dir], sid === null ? undefined : { env: { CLAUDE_CODE_SESSION_ID: sid } })
 
   if (r.exitCode !== 0) {
     return { text: `mmrun ${kind} failed: ${r.stderr.split('\n')[0] ?? ''}` }
@@ -399,26 +453,32 @@ async function start($: EngineInterface, kind: MmWatch['kind'], words: string[],
     .filter(line => !FOLLOW_UP.test(line))
     .join('\n')
     .trim()
-  const rid = RUN_LINE.exec(r.stdout)?.[1]
+  // A large review is split into parts, one run each.
+  const rids = r.stdout
+    .split('\n')
+    .map(line => RUN_LINE.exec(line)?.[1])
+    .filter(rid => rid !== undefined)
 
-  if (rid === undefined) {
+  if (rids.length === 0) {
     return { text }
   }
 
   const note =
     kind === 'review'
-      ? `Review ${rid} was started by /mm:review. When it finishes, the mm plugin sends each model's critical/major findings; do not run \`mmrun wait\` yourself.`
-      : `Run ${rid} was started by /mm:run. When it finishes, the mm plugin sends the results; do not run \`mmrun wait\` yourself.`
+      ? `Review ${rids.join(', ')} was started by /mm:review. When ${rids.length > 1 ? 'each run' : 'it'} finishes, the mm plugin sends each model's critical/major findings; do not run \`mmrun wait\` yourself.`
+      : `Run ${rids.join(', ')} was started by /mm:run. When it finishes, the mm plugin sends the results; do not run \`mmrun wait\` yourself.`
 
   // The run is started: a failure from here on must not reach the hook's catch, whose markdown fallback starts another.
-  try {
-    const watch: MmWatch = { rid, kind, startedAt: await $.clock.now() }
+  for (const rid of rids) {
+    try {
+      const watch: MmWatch = { rid, kind, startedAt: await $.clock.now() }
 
-    await update($, watches, list => [...list, watch])
-    await mark($, rid, true)
-  } catch (error) {
-    $.ui.log(`mm: watching ${rid} failed, the next poll tries again: ${String(error)}`, { to: 'debug' })
-    unwatched.push({ rid, kind })
+      await update($, watches, list => [...list, watch])
+      await mark($, rid, true)
+    } catch (error) {
+      $.ui.log(`mm: watching ${rid} failed, the next poll tries again: ${String(error)}`, { to: 'debug' })
+      unwatched.push({ rid, kind })
+    }
   }
 
   ensurePoller($)
@@ -432,6 +492,7 @@ function isStartable(kind: MmWatch['kind'], words: string[]): boolean {
 }
 
 export const register: Register = (on, options) => {
+  registerGuard(on, options)
   const reviewModels = String(options.reviewModels)
 
   on('session.start', async ($, e, next) => {

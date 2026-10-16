@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'claude-code/testing'
 
-import { elapsedBar, FILL, horizontalGauge, MEMORY, scaleOf, TRACK } from '../hooks/desktop-svg'
+import { dotsSvg, elapsedBar, FILL, fitText, horizontalGauge, icon, ICON_PATHS, MEMORY, ring, scaleOf, sparkBars, sparkText, stackedBar, textPx, TRACK } from '../hooks/desktop-svg'
+import type { IconName } from '../hooks/desktop-svg'
 import type { Tone } from '../hooks/desktop-svg'
 
 /** The numeric attribute `name` of the first element tagged `data-part="part"`. */
@@ -38,9 +39,29 @@ describe('the elapsed bar', () => {
     expect(Math.abs(attrOf(svg, 'fill', 'width') - track / 2)).toBeLessThanOrEqual(1)
   })
 
-  test('a running bar ends in an arrow, an ended one in a square', () => {
-    expect(elapsedBar(60, 300, 'running', true)).toContain('<path data-part="end"')
-    expect(elapsedBar(60, 300, 'done', false)).toContain('<rect data-part="end"')
+  test('a running bar ends in a dot at its head, an ended one in its rounded fill alone', () => {
+    expect(elapsedBar(60, 300, 'running', true)).toContain('<circle data-part="head"')
+    expect(elapsedBar(60, 300, 'done', false)).not.toContain('data-part="head"')
+    expect(elapsedBar(60, 300, 'done', false)).not.toContain('data-part="end"')
+  })
+
+  test('K1: the track is TRACK filled at 22% with round ends, never stroked; the fill is rounded too', () => {
+    for (const svg of [elapsedBar(60, 300, 'done', false), elapsedBar(60, 300, 'running', true), horizontalGauge(0.5, FILL.done)]) {
+      expect(svg).toMatch(new RegExp(`data-part="track"[^>]* rx="[1-9][^"]*" fill="${TRACK}" fill-opacity=".22"`))
+      expect(svg).not.toMatch(/data-part="track"[^>]*stroke=/)
+      expect(svg).toMatch(/data-part="fill"[^>]* rx="[1-9]/)
+    }
+  })
+
+  test('the head dot stays inside the drawing at either end', () => {
+    for (const secs of [0, 300]) {
+      const svg = elapsedBar(secs, 300, 'running', true, 200, 10)
+      const cx = attrOf(svg, 'head', 'cx')
+      const r = attrOf(svg, 'head', 'r')
+
+      expect(cx - r).toBeGreaterThanOrEqual(0)
+      expect(cx + r).toBeLessThanOrEqual(200)
+    }
   })
 
   test('an unknown time is a dashed empty track, not a zero', () => {
@@ -78,6 +99,61 @@ describe('the horizontal gauge', () => {
   })
 })
 
+describe('the kit drawings', () => {
+  test('K2: a ring of radius 9 and stroke 3 that starts at the top with a round cap; half fills half the circumference', () => {
+    const svg = ring(0.5, FILL.done)
+
+    expect(svg).toContain('viewBox="0 0 24 24"')
+    expect(svg).toMatch(/data-part="track"[^>]* r="9"[^>]*stroke-opacity=".22" stroke-width="3"/)
+    expect(svg).toMatch(/data-part="fill"[^>]*stroke-width="3" stroke-linecap="round"[^>]*transform="rotate\(-90 12 12\)"/)
+
+    const [filled, whole] = (svg.match(/stroke-dasharray="([^"]+)"/)?.[1] ?? '').split(' ').map(Number) as [number, number]
+
+    expect(Math.abs(filled / whole - 0.5)).toBeLessThan(0.01)
+    expect(ring(0, FILL.done), 'nothing filled draws no cap').not.toContain('data-part="fill"')
+    expect(ring(null, FILL.done)).not.toContain('data-part="fill"')
+  })
+
+  test('K3: the terminal levels run ▁ to █, the largest at █; the columns put the largest at full height', () => {
+    expect(sparkText([0, 4, 8])).toBe('▁▅█')
+    expect(sparkText([0, 0])).toBe('▁▁')
+
+    const svg = sparkBars([1, 2, 4, 0], FILL.running, 100, 20)
+    const heights = [...svg.matchAll(/data-part="bar"[^>]* height="([^"]+)"/g)].map(m => Number(m[1]))
+
+    expect(heights).toEqual([5, 10, 20, 2])
+    expect(svg, 'a zero is a faint stub').toContain('fill-opacity=".22"')
+  })
+
+  test('K4: each part takes its share of the width, in its tone', () => {
+    const svg = stackedBar([{ value: 1, tone: 'running' }, { value: 3, tone: 'done' }], 200)
+    const parts = [...svg.matchAll(/data-part="part"[^>]* width="([^"]+)"[^>]* fill="([^"]+)"/g)].map(m => [Number(m[1]), m[2]])
+
+    expect(parts).toEqual([[50, FILL.running], [150, FILL.done]])
+    expect(stackedBar([{ value: 0, tone: 'done' }], 200)).not.toContain('data-part="part"')
+  })
+
+  test('K5: every icon is a stroked path on the 24 grid', () => {
+    for (const name of Object.keys(ICON_PATHS) as IconName[]) {
+      const svg = icon(name, FILL.stale)
+
+      expect(svg, name).toContain('viewBox="0 0 24 24"')
+      expect(svg, name).toContain(`stroke="${FILL.stale}"`)
+      expect(svg, name).toContain('fill="none"')
+    }
+
+    expect(Object.keys(ICON_PATHS).sort()).toEqual(['agent', 'check', 'clock', 'gpu', 'running', 'shield', 'terminal', 'warning'])
+  })
+
+  test('K8: a CJK character counts 1em, so a Chinese title is cut where it fills the room', () => {
+    expect(textPx('需要你', 10)).toBe(30)
+    expect(textPx('abc', 10)).toBeLessThan(20)
+    expect(fitText('需要你处理的任务', 10, 50)).toBe('需要你处…')
+    expect(fitText('short', 10, 100)).toBe('short')
+    expect(textPx(fitText('一二三四五六七八九十', 12, 70), 12)).toBeLessThanOrEqual(70)
+  })
+})
+
 /** WCAG relative luminance of `#rrggbb`. */
 function luminance(hex: string): number {
   const [r, g, b] = [1, 3, 5].map(at => {
@@ -105,6 +181,12 @@ const DRAWN = [
   horizontalGauge(0.76, MEMORY, false),
   horizontalGauge(0.52, FILL.done, true),
   horizontalGauge(null, FILL.done, false),
+  ring(0.4, FILL.done),
+  ring(0.7, MEMORY),
+  sparkBars([1, 0, 3], FILL.running, 60, 16),
+  stackedBar([{ value: 1, tone: 'running' }, { value: 1, tone: 'done' }, { value: 1, tone: 'failed' }, { value: 1, tone: 'stale' }], 120),
+  icon('warning', FILL.stale),
+  dotsSvg(['running', 'done', 'idle', 'failed']),
 ]
 
 describe('readable on a light and a dark theme', () => {
@@ -122,7 +204,7 @@ describe('readable on a light and a dark theme', () => {
       )
 
       expect([...colors].sort(), 'every fill, memory, and the track are drawn').toEqual(
-        [TRACK, MEMORY, ...Object.values(FILL)].sort(),
+        [...new Set([TRACK, MEMORY, ...Object.values(FILL)])].sort(),
       )
 
       for (const color of colors) {

@@ -321,7 +321,8 @@ describe('mmrun ToolUse', () => {
       const ui = await mountUse($, surface, `toolu_mx_${surface}`, 'Bash', { command: `mmrun result codex ${R1}` })
       expect(await ui.find({ text: 'grok' })).toBeUndefined()
       expect(await ui.find({ text: '25.8k' })).toBeUndefined()
-      expect(await ui.find({ type: 'Svg' })).toBeUndefined()
+      // The desktop's one Svg is the row's terminal icon, no elapsed bar.
+      expect((await ui.findAll({ type: 'Svg' })).map(svg => svg.props.alt)).toEqual(surface === 'desktop' ? ['Bash'] : [])
       expect(await ui.find(ENGINE)).toBeDefined()
       await ui.unmount()
     }
@@ -414,10 +415,10 @@ describe('guard denials', () => {
         expect(await ui.find({ text: '已阻止:共享主树 git 操作' })).toBeDefined()
         expect(await textsOf(ui)).toContain(STEP_GIT)
       } else {
-        // The desktop names the command and gives the whole explanation under 允许的下一步; the raw result is behind its button.
+        // The desktop names the command and gives the whole explanation under 怎么办; the raw result is behind its button.
         expect((await ui.find({ type: 'Text', text: '已拦截：在共享主工作树上执行 git checkout' }))?.props.color).toBe('error')
         expect(await ui.find({ type: 'Code' }), 'the title names the command once').toBeUndefined()
-        expect(await ui.find({ type: 'Text', text: '允许的下一步' })).toBeDefined()
+        expect(await ui.find({ type: 'Text', text: '怎么办' })).toBeDefined()
         expect((await textsOf(ui)).some(text => text.includes(STEP_GIT))).toBe(true)
         expect(await ui.find(ENGINE)).toBeUndefined()
         await ui.press({ key: 'raw' })
@@ -517,14 +518,26 @@ describe('English', () => {
       expect(await textsOf(git)).toEqual(
         surface === 'terminal'
           ? ['✗ Blocked: shared main worktree git', STEP_GIT, 'engine row']
-          : ['Blocked: git checkout on the shared main worktree', 'Allowed next step', `${STEP_GIT}. Linked worktrees are exempt.`, 'engine row'],
+          : [
+              'Blocked: git checkout on the shared main worktree',
+              'Command',
+              'git checkout',
+              'Reason',
+              'Blocked on the shared main worktree: `git checkout` would take away uncommitted changes from other sessions or the user',
+              'What to do',
+              `${STEP_GIT}. Linked worktrees are exempt.`,
+              'harness · guard-shared-tree-git.py',
+              'engine row',
+            ],
       )
       expect(await hanIn(git)).toBeUndefined()
       await git.unmount()
       const raw = await mountResult($, surface, `toolu_eraw_${surface}`, 'Bash', { stdout: '', stderr: GUARD_RAW, interrupted: false }, true)
       if (surface === 'desktop') await raw.press({ key: 'raw' })
       expect(await textsOf(raw)).toEqual(
-        surface === 'terminal' ? ['✗ Blocked: reading the mmrun event stream', STEP_RAW, 'engine row'] : ['Blocked: reading the mmrun event stream', 'Allowed next step', STEP_RAW, 'engine row'],
+        surface === 'terminal'
+          ? ['✗ Blocked: reading the mmrun event stream', STEP_RAW, 'engine row']
+          : ['Blocked: reading the mmrun event stream', 'Reason', 'mm: *.raw is the full event stream (tens of thousands of tokens); do not read it', 'What to do', STEP_RAW, 'mm · guard.py', 'engine row'],
       )
       expect(await hanIn(raw)).toBeUndefined()
       await raw.unmount()

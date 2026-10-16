@@ -1,4 +1,5 @@
-export type AgentRunState = 'running' | 'done' | 'aborted' | 'error' | 'refusal'
+/** `idle`: a teammate between turns, waiting for a message; neither running nor ended. */
+export type AgentRunState = 'running' | 'idle' | 'done' | 'aborted' | 'error' | 'refusal'
 
 export type AgentRun = {
   agentId: string
@@ -34,6 +35,8 @@ export type AgentRun = {
   slot?: string
   /** What its last turn cost, as its turn.complete reported it. */
   usage?: AgentUsage
+  /** A `$.agent.list()` that was read showed it: a later one that does not has dropped its task. */
+  listed?: true
 }
 
 /** A subagent turn's four token counts and the model that answered last. */
@@ -103,6 +106,37 @@ export type MmModel = {
   /** secs= from <model>.meta. */
   secs?: number
   outputTokens?: number
+  /** The session that ran mmrun, from <model>.events.jsonl; absent when the file is missing or names none. */
+  claudeSession?: string
+  /** From the latest task_progress in <model>.events.jsonl; cumulative. */
+  tools?: number
+  lastTool?: string
+  summary?: string
+  /** The model's own transcript, from <model>.events.jsonl: a codex rollout or a grok chat_history. */
+  transcriptPath?: string
+}
+
+/** One agent as the agents and mmrun pages draw it: a subagent of this session, or one model of an mm run. */
+export type TaskRow = {
+  /** agentId, or `<runid>/<model>`. */
+  id: string
+  origin: 'subagent' | 'mm'
+  /** 'claude' for a subagent; the mm model name (codex, grok, agy, ...). */
+  provider: string
+  /** subagentType, or the run's mode. */
+  kind: string
+  /** The Agent call's description, or the run's tag. */
+  title: string
+  model: string
+  status: 'running' | 'done' | 'failed' | 'stopped' | 'stale'
+  startedAt: number
+  endedAt?: number
+  tools?: number
+  lastTool?: string
+  summary?: string
+  outputTokens?: number
+  /** mm only: true when this session started the run, false when another did; absent when the run does not say. */
+  isThisSession?: boolean
 }
 
 export type MmRun = {
@@ -132,14 +166,14 @@ export type DashTimelineView = 'turn' | 'hotspots'
 /** The desktop waterfall's step page: `back` pages before the newest, for the turn it was picked on. */
 export type DashTimelinePage = { turnId: string; back: number }
 
-/** Epoch ms of the last visit to each page; an item that ended at or before it counts as read. */
-export type DashSeen = { agents: number; runs: number }
+/** Epoch ms of the last visit to each page; an item that ended at or before it counts as read. `ci`: the last visit to any page. */
+export type DashSeen = { agents: number; runs: number; ci?: number }
 
 /** The item the workbench shows in full instead of its page's list. */
 export type DashDetail =
   | { page: 'agents'; agentId: string }
-  /** `model` and `finding` are the desktop reader's: the model shown (absent, the first) and the index into its shown findings. */
-  | { page: 'mmrun'; runid: string; showAll: boolean; model?: string; finding?: number }
+  /** `model`, `finding` and `view` are the desktop reader's: the model shown (absent, the first), the index into its shown findings, and its report or its own transcript (absent, the report). */
+  | { page: 'mmrun'; runid: string; showAll: boolean; model?: string; finding?: number; view?: 'report' | 'conversation' }
 
 /** One review finding as the desktop reader shows it. */
 export type DashFinding = { severity: string; file: string; line: string; claim: string; quote: string; failureScenario: string; basis: string; suggestion: string }
@@ -149,6 +183,11 @@ export type DashReview = { verdict: string; summary: string; findings: DashFindi
 
 /** A run's model conclusions, read when the person pressed Read: markdown for the terminal, and the parsed review when the JSON was one. */
 export type DashReport = { loadedAt: number; models: { name: string; status: string; markdown: string; review?: DashReview }[] }
+
+/** One entry of an external model's own transcript as the reader shows it. */
+export type ConversationItem = { kind: 'user' | 'assistant' | 'thinking' | 'call' | 'result'; text: string; tool?: string }
+/** The open conversation view's read: null items when the file could not be read. */
+export type DashConversation = { runid: string; model: string; readAt: number; items: ConversationItem[] | null; dropped: number }
 
 /** One Bash call whose output read as a test run. */
 export type GateRun = {
@@ -471,6 +510,8 @@ declare module 'claude-code' {
       detail: Shaped<DashDetail | null>
       /** Per runid. */
       reports: Shaped<Record<string, DashReport>>
+      /** The desktop reader's conversation view, as last read; null before the first. */
+      conversation: Shaped<DashConversation | null>
       /** Per tool_use_id: whether an Agent call's row shows its prompt under it. */
       expandedTask: StateFamily<boolean>
       /** Per tool_use_id: whether a test-summary ToolResult, or a desktop guard denial, shows the raw output under it. */
@@ -504,6 +545,8 @@ declare module 'claude-code' {
       peek: Shaped<AgentPeek | null>
       /** Whether the Agents page shows its folded ended agents. */
       agentsFoldOpen: boolean
+      /** Whether the mmrun page shows the runs other sessions started. */
+      runsFoldOpen: boolean
       /** `seen.agents` as it was before the current visit to the Agents page: what ended after it is listed as unread. */
       agentsSeenBefore: number
       /** This session's token and skill ledger; null before its first request or Skill call. */

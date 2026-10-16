@@ -11,6 +11,8 @@ export type MmWatch = {
   results?: { model: string; status: string; output: string; reason?: string; patch?: string }[]
   /** Models whose ended result the main thread already read; the message leaves their output out. */
   seen?: string[]
+  /** Every run of the review this run is a part of, in part order (run.meta `group`); absent for an unsplit run. */
+  group?: string[]
   /** The 60-minute reminder has been sent for this run. */
   reminded?: boolean
 }

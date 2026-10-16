@@ -36,6 +36,7 @@ import {
   planConsolidation,
   planNodes,
   planRequest,
+  planSyncEvents,
   RECORD_SYSTEM,
   recordPrompt,
   replyLine,
@@ -57,6 +58,7 @@ const CLOSE_USAGE = 'Usage: /progress-close <node or request id> done|dropped'
 const LINE_USAGE = 'Usage: /progress-line <request id> <line id>, or /progress-line <request id> new <name>'
 const COMMAND_CHARS = 120
 const MAX_DIRS = 8
+const HINT_STEPS = 12
 const PLAN_TOOL = {
   name: 'progress_plan',
   description:
@@ -474,6 +476,65 @@ async function plan($: EngineInterface, input: Readonly<Record<string, unknown>>
   return { text: `Request ${planned.request} is on the progress board with ${planned.steps.length} steps: ${planned.steps.join(', ')}` }
 }
 
+/** The desktop app's task list synced into the session's open current request, written to this session's file; no storage asked. */
+async function syncPlan($: EngineInterface, items: readonly unknown[]): Promise<void> {
+  const place = await boardPlace($)
+
+  if (place.storage === null) {
+    return
+  }
+
+  const dir = eventsDir(place.storage, place.home, place.project, place.root)
+  const files = await readEvents($, dir)
+  const session = await $.session.id()
+  const before = Object.values(files).flat()
+  const now = await $.clock.now()
+  const requests = foldRequests(before, now)
+  const stored: unknown = await $.store.get(await requestKey($))
+  const open = requests.find(one => one.id === stored && one.status === 'open') ?? null
+
+  if (open === null) {
+    return
+  }
+
+  const nodes = foldBoard(before)
+  const taken = new Set([...nodes.map(one => one.id), ...requests.map(one => one.id)])
+  const commit = await gitOut($, place.root, ['rev-parse', '--short', 'HEAD'])
+  const events = planSyncEvents(items, nodes, open.id, taken, now, session, commit)
+
+  if (events.length === 0) {
+    return
+  }
+
+  await $.fs.write(`${dir}/${session}.json`, JSON.stringify([...(files[`${session}.json`] ?? []), ...events]))
+  await syncCanvas($, place.home, place.project, events, [...before, ...events], now)
+}
+
+/** The session's open current request and its pieces not dropped, in board order, as the model reads them beside a typed prompt; null when there is none. */
+async function boardHint($: EngineInterface): Promise<string | null> {
+  const place = await boardPlace($)
+
+  if (place.storage === null) {
+    return null
+  }
+
+  const before = Object.values(await readEvents($, eventsDir(place.storage, place.home, place.project, place.root))).flat()
+  const stored: unknown = await $.store.get(await requestKey($))
+  const open = foldRequests(before, await $.clock.now()).find(one => one.id === stored && one.status === 'open')
+  const steps = open === undefined ? [] : foldBoard(before).filter(one => one.request === open.id && one.status !== 'dropped')
+
+  if (open === undefined || steps.length === 0) {
+    return null
+  }
+
+  const list = steps
+    .slice(0, HINT_STEPS)
+    .map(one => `[${one.status}] ${one.title}`)
+    .join('; ')
+
+  return `Progress board, this session's current request ${open.id} "${open.title}": ${list}. If this prompt continues that request, use these step words in update_plan.`
+}
+
 /**
  * /progress-close: a request closed by the person or dropped, or a node set to done or dropped, in one event in this session's
  * file; a node's request closed too when that was its one piece. The events are mirrored to the canvas.
@@ -688,7 +749,9 @@ export const register: Register = on => {
     // Set before next: the turn the prompt begins starts inside it. Only the person's own Enter is typed.
     typedPrompt = e.origin.kind === 'composer' ? e.text : null
 
-    const r = await next(e)
+    // The hint is a nicety: any failure building it leaves the prompt as it came.
+    const hint = e.origin.kind === 'composer' ? await boardHint($).catch(() => null) : null
+    const r = await next(hint === null ? e : { ...e, context: [...(e.context ?? []), hint] })
 
     if (r.drop !== undefined) {
       typedPrompt = null
@@ -784,6 +847,23 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => {
     hookFailed($, 'classic.PostToolUse Bash (progress)', next.error)
+
+    return next(e)
+  })
+
+  // The main model's task list in the desktop app; a call with no items moves its list and carries none.
+  on('classic.PostToolUse', { tool_name: ['mcp__ccd_turn__update_plan'] }, async ($, e, next) => {
+    const input = typeof e.tool_input === 'object' && e.tool_input !== null ? (e.tool_input as Record<string, unknown>) : {}
+    const items = input.items
+
+    // Queued, not awaited: a recording under way may hold the chain for a model call.
+    if (e.agent_id === undefined && Array.isArray(items)) {
+      onRecording(() => syncPlan($, items)).catch((error: unknown) => $.ui.log(`progress: syncing the task list failed: ${String(error)}`, { to: 'debug' }))
+    }
+
+    return next(e)
+  }).catch(($, e, next) => {
+    hookFailed($, 'classic.PostToolUse update_plan (progress)', next.error)
 
     return next(e)
   })

@@ -25,6 +25,10 @@ const band = (surface: Surface): RenderInput<'AbovePrompt'> => ({
   props: { hasSurvey: false, isWorking: true, maxRows: 20, bodyColumns: 100, scroll: { offset: 0, bodyRows: 19 }, view: {} },
 })
 
+// The band's leading status glyph: text on the terminal, the row's icon on the desktop.
+const failMark = (surface: Surface) => (surface === 'terminal' ? '✗ ' : '')
+const idleMark = (surface: Surface) => (surface === 'terminal' ? '✓ ' : '')
+
 const pane = (surface: Surface): RenderInput<'Pane'> => ({
   component: 'Pane',
   surface,
@@ -169,17 +173,17 @@ describe('gates', () => {
         expect(text).toContain('main · ')
         expect(text.indexOf(HARNESS)).toBeLessThan(text.indexOf('claude plugin test plugins/dashboard'))
       } else {
-        // The desktop titles a gate by its command's first line, the outcome on the line under it.
+        // The desktop's gate row: the outcome and its counts, the command and the tree on the line under it.
         expect(text).toContain('主树 · 2 fail')
-        expect(text).toContain('claude plugin test主树 · 通过 24')
-        expect(text.lastIndexOf('主树 · 2 fail')).toBeLessThan(text.indexOf('主树 · 通过 24'))
+        expect(text).toContain('通过  24 pass · 0 fail前claude plugin test · 主树')
+        expect(text.indexOf('失败  22 pass · 2 fail')).toBeLessThan(text.indexOf('通过  24 pass · 0 fail'))
       }
     }
 
     const desktop = textOf(await $.ui.render(pane('desktop')))
 
-    expect(desktop).toContain('✗ 失败')
-    expect(desktop).toContain('✓ 通过')
+    expect(desktop).toContain('✗失败')
+    expect(desktop).toContain('✓通过')
   })
 
   test('a failed gate is on the band until the same command passes', { options: { language: 'zh-CN' } }, async ($, on) => {
@@ -188,7 +192,7 @@ describe('gates', () => {
     await failed($, HARNESS, BUN_FAIL)
 
     for (const surface of SURFACES) {
-      expect(textOf(await $.ui.render(band(surface)))).toContain(`✗ 门禁 ${HARNESS} · 2 fail`)
+      expect(textOf(await $.ui.render(band(surface)))).toContain(`${failMark(surface)}门禁 ${HARNESS} · 2 fail`)
     }
 
     await ran($, DASH, BUN_OK)
@@ -197,7 +201,7 @@ describe('gates', () => {
     await ran($, HARNESS, BUN_OK)
 
     for (const surface of SURFACES) {
-      expect(linesOf(await $.ui.render(band(surface)))).toEqual(['空闲 · 门禁 ✓ 24 pass 0s前', 'engine band'])
+      expect(linesOf(await $.ui.render(band(surface)))).toEqual([`${idleMark(surface)}空闲 · 门禁 ✓ 24 pass 0s前`, 'engine band'])
     }
   })
 
@@ -206,7 +210,7 @@ describe('gates', () => {
     await ran($, 'go test ./...', ['ok  \texample.com/a\t0.01s', 'FAIL\texample.com/b\t0.02s'].join('\n'))
 
     for (const surface of SURFACES) {
-      expect(textOf(await $.ui.render(band(surface))), surface).toContain('✗ gate go test ./... · packages · 1 fail')
+      expect(textOf(await $.ui.render(band(surface))), surface).toContain(`${failMark(surface)}gate go test ./... · packages · 1 fail`)
       expect(textOf(await $.ui.render(pane(surface))), surface).toContain(surface === 'terminal' ? 'packages · 1 pass · 1 fail' : 'main · packages · 1 fail')
     }
   })
@@ -216,7 +220,7 @@ describe('gates', () => {
 
     await failed($, HARNESS, BUN_FAIL)
     await clock.advance(30 * 60_000 + 1)
-    expect(linesOf(await $.ui.render(band('terminal'))), 'off the band, still the last gate on the idle line').toEqual(['空闲 · 门禁 ✗ 2 fail 30m前', 'engine band'])
+    expect(linesOf(await $.ui.render(band('terminal'))), 'off the band, still the last gate on the idle line').toEqual(['✓ 空闲 · 门禁 ✗ 2 fail 30m前', 'engine band'])
   })
 
   test('the desktop overview, mounted with nothing else redrawing it, drops a failed gate from 需要你 the moment its 30 minutes pass', { options: { language: 'zh-CN' } }, async ($, on) => {
@@ -226,11 +230,11 @@ describe('gates', () => {
 
     const ui = await $.ui.mount({ plugin: 'dashboard', ...pane('desktop') } as never)
 
-    expect(textOf(await ui.drawn())).toContain('需要你  1')
+    expect(textOf(await ui.drawn())).toContain('需要你 · 1')
     await clock.advance(30 * 60_000 - 1_000)
-    expect(textOf(await ui.drawn()), 'a second before').toContain('需要你  1')
+    expect(textOf(await ui.drawn()), 'a second before').toContain('需要你 · 1')
     await clock.advance(1_000)
-    expect(textOf(await ui.drawn())).not.toContain('需要你  1')
+    expect(textOf(await ui.drawn())).not.toContain('需要你 · 1')
     await ui.unmount()
   })
 
@@ -242,9 +246,10 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const text = textOf(await $.ui.render(pane(surface)))
 
-      expect(text).toContain('agent-abc · ')
-      expect(text).toContain('agent-def · ')
-      expect(text).not.toContain('main · ')
+      // The desktop names the tree after the command.
+      expect(text).toContain(surface === 'terminal' ? 'agent-abc · ' : ' · agent-abc')
+      expect(text).toContain(surface === 'terminal' ? 'agent-def · ' : ' · agent-def')
+      expect(text).not.toContain(surface === 'terminal' ? 'main · ' : ' · main')
     }
   })
 
@@ -270,13 +275,13 @@ describe('gates', () => {
         expect(text, surface).toContain('需要你 · 4')
         expect(text, `${surface}: not listed, so it needs nobody; still under 最近门禁`).toContain('bun test gone  agent-gone · ')
       } else {
-        // Titled by the command without its cd; 需要你 shows three of the four.
-        expect(text, surface).toContain('bun test qfeat x · 2 fail')
-        expect(text, surface).toContain('bun test dfeat x · 2 fail')
-        expect(text, surface).toContain('bun testhome-tree · 2 fail')
-        expect(text, surface).toContain('bun test cfeat x · 2 fail')
-        expect(text, surface).toContain('需要你  4')
-        expect(text, `${surface}: not listed, so it needs nobody; still under 最近门禁`).toContain('bun test goneagent-gone · 2 fail')
+        // The command without its cd; 需要你 shows three of the four, 最近门禁 the newest three.
+        expect(text, surface).toContain('bun test q位置feat x · 2 fail')
+        expect(text, surface).toContain('bun test d位置feat x · 2 fail')
+        expect(text, surface).toContain('bun test位置home-tree · 2 fail')
+        expect(text, surface).toContain('bun test c · feat x')
+        expect(text, surface).toContain('需要你 · 4')
+        expect(text, `${surface}: not listed, so it needs nobody; still under 最近门禁`).toContain('bun test gone · agent-gone')
       }
 
       expect(text, surface).not.toContain('门禁 bun test gone · agent-gone')
@@ -296,7 +301,7 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const text = textOf(await $.ui.render(band(surface)))
 
-      expect(text, surface).toContain(`✗ 门禁 ${HARNESS} · 2 fail`)
+      expect(text, surface).toContain(`${failMark(surface)}门禁 ${HARNESS} · 2 fail`)
       expect(text, surface).not.toContain('门禁 bun test · 2 fail')
     }
   })
@@ -311,9 +316,9 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const drawn = textOf(await $.ui.render(band(surface)))
 
-      expect(drawn, surface).toContain('✗ 门禁 bun test · 2 fail · feat')
+      expect(drawn, surface).toContain(`${failMark(surface)}门禁 bun test · 2 fail · feat`)
       expect(drawn, surface).not.toContain(HARNESS)
-      expect(textOf(await $.ui.render(pane(surface))), surface).toContain(surface === 'terminal' ? '需要你 · 1' : '需要你  1')
+      expect(textOf(await $.ui.render(pane(surface))), surface).toContain('需要你 · 1')
     }
   })
 
@@ -328,7 +333,7 @@ describe('gates', () => {
     await ran($, "bun test -t 'a b'", BUN_OK)
 
     for (const surface of SURFACES) {
-      expect(textOf(await $.ui.render(pane(surface))), `${surface}: neither pass covers the other command's failure`).toContain(surface === 'terminal' ? '需要你 · 2' : '需要你  2')
+      expect(textOf(await $.ui.render(pane(surface))), `${surface}: neither pass covers the other command's failure`).toContain('需要你 · 2')
     }
   })
 
@@ -345,7 +350,7 @@ describe('gates', () => {
     await clock.advance(30 * 60_000)
 
     for (const ui of bands) {
-      expect(linesOf(await ui.drawn()), ui.surface).toEqual(['空闲 · 门禁 ✗ 2 fail 30m前', 'engine band'])
+      expect(linesOf(await ui.drawn()), ui.surface).toEqual([`${idleMark(ui.surface as Surface)}空闲 · 门禁 ✗ 2 fail 30m前`, 'engine band'])
       await ui.unmount()
     }
   })
@@ -356,15 +361,15 @@ describe('gates', () => {
     await ran($, DASH, XCODE_FALSE_GREEN)
 
     for (const surface of SURFACES) {
-      expect(textOf(await $.ui.render(band(surface))), surface).toContain('✗ 门禁 claude plugin test plugins/dashboard · 失败')
+      expect(textOf(await $.ui.render(band(surface))), surface).toContain(`${failMark(surface)}门禁 claude plugin test plugins/dashboard · 失败`)
     }
 
     expect(linesOf(await $.ui.render(pane('terminal'))).filter(line => /^[✓✗] \d+ pass/.test(line)).map(line => line.slice(0, 20))).toEqual(['✗ 824 pass · 失败  cla', '✓ 24 pass · 0 fail  '])
 
     const desktop = textOf(await $.ui.render(pane('desktop')))
 
-    expect(desktop.indexOf('✗ 失败')).toBeLessThan(desktop.indexOf('✓ 通过'))
-    expect(desktop.split('✗ 失败').length - 1).toBe(1)
+    expect(desktop.indexOf('✗失败')).toBeLessThan(desktop.indexOf('✓通过'))
+    expect(desktop.split('✗失败').length - 1).toBe(1)
   })
 
   test('总览 需要你 words a gate as the band does: 失败 when nothing counted failing, not 0 fail', { options: { language: 'zh-CN' } }, async ($, on) => {
@@ -374,7 +379,7 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const text = textOf(await $.ui.render(pane(surface)))
 
-      expect(text, surface).toContain(surface === 'terminal' ? '门禁 claude plugin test plugins/dashboard · main · 失败' : 'claude plugin test主树 · 失败')
+      expect(text, surface).toContain(surface === 'terminal' ? '门禁 claude plugin test plugins/dashboard · main · 失败' : 'claude plugin test位置主树 · 失败')
       expect(text, surface).not.toContain(surface === 'terminal' ? 'main · 0 fail' : '主树 · 0 fail')
     }
   })
@@ -388,8 +393,8 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const drawn = textOf(await $.ui.render(band(surface)))
 
-      expect(drawn, surface).toContain('✗ 门禁 bun test x · 失败')
-      expect(drawn, surface).toContain('✗ 门禁 pytest -q · 2 fail')
+      expect(drawn, surface).toContain(`${failMark(surface)}门禁 bun test x · 失败`)
+      expect(drawn, surface).toContain(`${failMark(surface)}门禁 pytest -q · 2 fail`)
     }
 
     expect(linesOf(await $.ui.render(pane('terminal'))).filter(line => /^[✓✗] \d+ pass/.test(line)).map(line => line.slice(0, 20))).toEqual(['✗ 3 pass · 2 fail  p', '✗ 24 pass · 失败  bun ', '✓ 24 pass · 0 fail  '])
@@ -402,7 +407,7 @@ describe('gates', () => {
     await ran($, 'cd sub && bun test', BUN_OK, WT)
 
     for (const surface of SURFACES) {
-      expect(textOf(await $.ui.render(band(surface))), `${surface}: main passing leaves the worktree's failure`).toContain(`✗ 门禁 ${HARNESS} · 2 fail`)
+      expect(textOf(await $.ui.render(band(surface))), `${surface}: main passing leaves the worktree's failure`).toContain(`${failMark(surface)}门禁 ${HARNESS} · 2 fail`)
 
       const text = textOf(await $.ui.render(pane(surface)))
 
@@ -411,16 +416,16 @@ describe('gates', () => {
         expect(text).toMatch(new RegExp(`${HARNESS}\\s*agent-wt · `))
         expect(text, surface).toMatch(/cd sub && bun test\s*agent-wt · /)
       } else {
-        expect(text).toMatch(/claude plugin test plugi\S*主树 · 通过 24/)
-        expect(text).toContain(`${HARNESS}agent-wt · 2 fail`)
-        expect(text, 'titled without its cd').toContain('bun testagent-wt · 通过 24')
+        expect(text).toContain(`${HARNESS} · 主树`)
+        expect(text).toContain(`${HARNESS}位置agent-wt · 2 fail`)
+        expect(text, 'the command without its cd').toContain('bun test · agent-wt')
       }
     }
 
     await ran($, HARNESS, BUN_OK, `${WT}/hooks`)
 
     for (const surface of SURFACES) {
-      expect(linesOf(await $.ui.render(band(surface)))).toEqual(['空闲 · 门禁 ✓ 24 pass 0s前', 'engine band'])
+      expect(linesOf(await $.ui.render(band(surface)))).toEqual([`${idleMark(surface)}空闲 · 门禁 ✓ 24 pass 0s前`, 'engine band'])
     }
   })
 
@@ -444,8 +449,8 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const text = textOf(await $.ui.render(pane(surface)))
 
-      expect(text, surface).toContain(surface === 'terminal' ? '需要你 · 1' : '需要你  1')
-      expect(text, surface).toContain(surface === 'terminal' ? `门禁 ${HARNESS} · agent-wt · 2 fail` : `门禁  ${HARNESS}agent-wt · 2 fail`)
+      expect(text, surface).toContain('需要你 · 1')
+      expect(text, surface).toContain(surface === 'terminal' ? `门禁 ${HARNESS} · agent-wt · 2 fail` : ` ✗ 门禁 命令${HARNESS}位置agent-wt · 2 fail`)
       expect(text, surface).not.toContain('没有需要你处理或运行中的任务')
     }
 
@@ -454,7 +459,7 @@ describe('gates', () => {
     await clock.advance(30 * 60_000 + 1)
 
     for (const surface of SURFACES) {
-      expect(textOf(await $.ui.render(pane(surface))), surface).not.toContain(surface === 'terminal' ? '需要你 · ' : '需要你  ')
+      expect(textOf(await $.ui.render(pane(surface))), surface).not.toContain('需要你 · ')
     }
   })
 
@@ -469,13 +474,13 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const drawn = await $.ui.render(band(surface))
 
-      expect(linesOf(drawn), surface).toEqual(['空闲 · 门禁 ✗ 2 fail · 过期 1m前', 'engine band'])
+      expect(linesOf(drawn), surface).toEqual([`${idleMark(surface)}空闲 · 门禁 ✗ 2 fail · 过期 1m前`, 'engine band'])
       expect(colorsOf(drawn, '✗'), surface).toEqual(['inactive'])
 
       const text = textOf(await $.ui.render(pane(surface)))
 
-      expect(text, surface).not.toContain(surface === 'terminal' ? '需要你 · ' : '需要你  ')
-      expect(text, surface).toContain(surface === 'terminal' ? '24 pass · 0 fail  bun test x' : '✓ 通过  bun test xagent-wt · 通过 24')
+      expect(text, surface).not.toContain('需要你 · ')
+      expect(text, surface).toContain(surface === 'terminal' ? '24 pass · 0 fail  bun test x' : '✓通过  24 pass · 0 fail前bun test x · agent-wt')
       expect(text, `${surface}: the worktree's gate is not 过期`).not.toMatch(/0 fail · 过期/)
     }
 
@@ -484,8 +489,8 @@ describe('gates', () => {
     expect(linesOf(terminal).filter(line => /^[✓✗] \d+ pass/.test(line)).map(line => line.slice(0, 26))).toEqual(['✗ 22 pass · 2 fail · 过期  c', '✓ 24 pass · 0 fail  bun te'])
     expect(colorsOf(terminal, '✗')).toEqual(['inactive'])
     expect(colorsOf(terminal, ' · 过期')).toEqual(['inactive'])
-    expect(colorsOf(await $.ui.render(pane('desktop')), ' ✗ 失败 ')).toEqual(['inactive'])
-    expect(textOf(withClocks(await $.ui.render(pane('desktop'))))).toContain('主树 · 2 fail · 过期 · 1m前')
+    expect(colorsOf(await $.ui.render(pane('desktop')), '失败 · 过期')).toEqual(['inactive'])
+    expect(textOf(withClocks(await $.ui.render(pane('desktop'))))).toContain('失败 · 过期  22 pass · 2 fail1m前claude plugin test plugins/harness · 主树')
   })
 
   test('what does not make a gate 过期: an edit in another tree or outside the session root, or one no later than the gate', { options: { language: 'zh-CN' } }, async ($, on) => {
@@ -501,8 +506,8 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const text = textOf(await $.ui.render(band(surface)))
 
-      expect(text, surface).toContain(`✗ 门禁 ${HARNESS} · 2 fail`)
-      expect(text, surface).toContain('✗ 门禁 bun test · 2 fail · agent-wt')
+      expect(text, surface).toContain(`${failMark(surface)}门禁 ${HARNESS} · 2 fail`)
+      expect(text, surface).toContain(`${failMark(surface)}门禁 bun test · 2 fail · agent-wt`)
     }
 
     await clock.advance(1_000)
@@ -511,7 +516,7 @@ describe('gates', () => {
     for (const surface of SURFACES) {
       const text = textOf(await $.ui.render(band(surface)))
 
-      expect(text, surface).toContain(`✗ 门禁 ${HARNESS} · 2 fail`)
+      expect(text, surface).toContain(`${failMark(surface)}门禁 ${HARNESS} · 2 fail`)
       expect(text, surface).not.toContain('bun test · 2 fail · agent-wt')
     }
   })

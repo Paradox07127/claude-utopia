@@ -1,6 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, HookFailure, Register, Timer } from 'claude-code'
 import type { HarnessIdle } from '../types'
+import { register as registerGuards } from './guards'
 import { pickLang, strings } from './i18n'
 import type { Lang } from './i18n'
 
@@ -90,7 +91,21 @@ async function armIdle($: EngineInterface, language: unknown): Promise<void> {
   idleTimer = $.clock.after(left, () => void compactIdle($, language))
 }
 
+// The direct-path rules of guard-secret.ts: globs relative to HOME (`*` also crosses `/`), and names matched anywhere.
+const HOME_SECRETS = ['.claude.json', '.claude.json.*', '.claude/backups/*', '.claude/settings.json', '.claude/settings.json.*',
+  '.claude/settings.local.json', '.codex/config.toml', '.codex/config.toml.*', '.codex/auth.json',
+  '.openviking/*', '.grok/auth.json', '.claude/file-history/*', '.codex/shell_snapshots/*']
+const SECRET_NAMES = ['ovcli.conf', 'ov.conf']
+const HOME_SECRET_RES = HOME_SECRETS.map(glob => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')}$`, 'i'))
+
+// Case-insensitive: the default macOS volume is, and a case alias keeps its own spelling in realPath.
+function isSecretPath(path: string, home: string | undefined): boolean {
+  if (SECRET_NAMES.includes(path.slice(path.lastIndexOf('/') + 1).toLowerCase())) return true
+  return home !== undefined && path.toLowerCase().startsWith(`${home.toLowerCase()}/`) && HOME_SECRET_RES.some(re => re.test(path.slice(home.length + 1)))
+}
+
 export const register: Register = (on, options) => {
+  registerGuards(on, options)
   const blocked = String(options.blockedSubagentModels).split(',').map(name => name.trim()).filter(name => name !== '')
   on('agent.spawn', ($, e, next) => {
     const model = e.model?.toLowerCase()
@@ -102,6 +117,21 @@ export const register: Register = (on, options) => {
     // It cannot tell whether the model was blocked, so it fails closed: undefined would leave the hook absent and let the spawn through.
     logFailure($, 'agent.spawn', next.error)
     return { deny: 'harness: the subagent model check failed, so the spawn is refused. Retry, or omit model and let the agent definition decide.' }
+  })
+
+  // The engine reads an @-mentioned file itself and raises no tool.call, so the PreToolUse guard never sees it.
+  on('prompt.mention', async ($, e, next) => {
+    const home = await $.env.get('HOME')
+    // A stat that rejects falls to the catch below, which denies; a path with no realPath (a dangling link) is denied too.
+    if (home !== undefined) {
+      const [{ realPath }, { realPath: realHome }] = await Promise.all([$.fs.stat(e.path, { resolve: true }), $.fs.stat(home, { resolve: true })])
+      if (realPath !== undefined && ![e.path, realPath].some(path => [home, realHome].some(h => isSecretPath(path, h)))) return next(e)
+    }
+    return { deny: `harness: @${e.mention} holds API keys, and attaching it would save them in the transcript. Ask the user to look at it; to check it, use metadata only (ls, stat, wc).` }
+  }).catch(($, e, next) => {
+    // A failed guard is skipped and the file read, so it fails closed unless the file already passed it.
+    logFailure($, 'prompt.mention', next.error)
+    return next.called ? next(e) : { deny: 'harness: the secret-file check failed, so the mentioned file is not attached. Retry, or ask the user to paste what is needed.' }
   })
 
   // Stats per offer instead of caching at session.start: the root moves with /cd and worktree moves.

@@ -36,12 +36,25 @@ const world = (on: On, reply: string | null, surfaces: string[] = ['desktop'], s
   on('session.usage', () => ({ value: { startedAt: 0, context: { tokens: 0, window: 1_000_000 }, rateLimits: {} } }) as never)
   on('session.start', ($, e) => ({ cwd: e.cwd }))
   on('command.register', ($, e) => ({ value: { command: e.name } }))
+  on('classic.PostToolUse', () => ({}))
   return { seen, store, clock: mock.clock(on, { now: 0 }) }
 }
 
 async function turnEnds($: Engine, clock: { advance: (ms: number) => Promise<void> }, agentId?: string): Promise<void> {
   await $.turn.complete({ ...REPLIED, ...(agentId !== undefined && { agentId }) } as never)
   await clock.advance(0)
+}
+
+// The desktop app's next-step box: `ask` puts a question over the buttons; a button with `action` sends no prompt.
+const BUTTONS = [{ label: 'Open PR', action: 'open_pr' }, { label: 'Yes', message: 'run the tests' }, { label: 'later' }]
+async function wrapUp($: Engine, input: { ask?: string; actions?: unknown[] }, agentId?: string): Promise<void> {
+  await $.classic.PostToolUse({
+    tool_name: 'mcp__ccd_turn__wrap_up',
+    tool_input: { recap: 'done', ...input },
+    tool_response: {},
+    tool_use_id: 'toolu_w',
+    ...(agentId !== undefined && { agent_id: agentId }),
+  } as never)
 }
 
 describe('promptSamples', () => {
@@ -132,6 +145,47 @@ describe('next-prompt prediction', () => {
   test("a plugin's suggestion passes the hook that hides the engine's own", async ($, on) => {
     world(on, 'next')
     expect((await $.prompt.suggest({ text: 'from a plugin' } as never)).isShown).toBe(true)
+  })
+
+  test('a next-step box that asks a question does not fork', async ($, on) => {
+    const { seen, clock } = world(on, 'next')
+    await wrapUp($, { ask: 'Run the tests?', actions: BUTTONS })
+    await turnEnds($, clock)
+    expect(seen.forks).toEqual([])
+  })
+
+  test('a next-step box with no question still forks', async ($, on) => {
+    const { seen, clock } = world(on, 'next')
+    await wrapUp($, { actions: BUTTONS })
+    await turnEnds($, clock)
+    expect(seen.forks).toHaveLength(1)
+  })
+
+  test("a box's reply button text is neither a typed prompt nor a prediction outcome", async ($, on) => {
+    const { store, clock } = world(on, 'run the tests')
+    await wrapUp($, { actions: BUTTONS })
+    await turnEnds($, clock)
+    await $.prompt.submit(typed('run the tests'))
+    expect(store.get('typedPrompts')).toBeUndefined()
+    expect(store.get('predictionLog')).toBeUndefined()
+  })
+
+  test('a prompt that matches no reply button is recorded, and the box ends with the next prompt', async ($, on) => {
+    const { store, clock } = world(on, 'next')
+    await wrapUp($, { ask: 'Run the tests?', actions: BUTTONS })
+    await turnEnds($, clock)
+    await $.prompt.submit(typed('Open PR'))
+    await $.prompt.submit(typed('run the tests'))
+    expect(store.get('typedPrompts')).toEqual([{ text: 'Open PR', cwd: '/proj' }, { text: 'run the tests', cwd: '/proj' }])
+  })
+
+  test("a subagent's next-step box leaves the main thread alone", async ($, on) => {
+    const { seen, store, clock } = world(on, 'next')
+    await wrapUp($, { ask: 'Run the tests?', actions: BUTTONS }, 'a1')
+    await turnEnds($, clock)
+    await $.prompt.submit(typed('run the tests'))
+    expect(seen.forks).toHaveLength(1)
+    expect(store.get('typedPrompts')).toEqual([{ text: 'run the tests', cwd: '/proj' }])
   })
 })
 

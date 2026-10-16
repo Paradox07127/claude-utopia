@@ -87,17 +87,32 @@ export function noteDone(
   )
 }
 
-/** The `$.agent.list()` statuses that mean an agent ended, as the state it ended in. */
-const LISTED_ENDS: Partial<Record<string, AgentRunState>> = { completed: 'done', failed: 'error', killed: 'aborted' }
+const isOpen = (run: AgentRun) => run.state === 'running' || run.state === 'idle'
 
-/** Closes the running agents the engine lists as ended, a killed one having no turn.complete; one it does not list stays as it was. */
+/** The `$.agent.list()` statuses that stop a running agent, as the state it takes. */
+const LISTED_STOPS: Partial<Record<string, AgentRunState>> = { idle: 'idle', completed: 'done', failed: 'error', killed: 'aborted' }
+
+/**
+ * Closes the running and idle agents the engine lists as ended (a killed one has no turn.complete) and idles the running ones it
+ * lists idle; one an earlier list showed and this one drops is closed aborted, one never listed (a workflow's) stays as it was.
+ */
 export function noteListed(list: readonly AgentRun[], listed: readonly Pick<AgentInfo, 'id' | 'status'>[], now: number): AgentRun[] {
-  const ends = new Map(listed.map(info => [info.id, LISTED_ENDS[info.status]]))
+  const stops = new Map(listed.map(info => [info.id, LISTED_STOPS[info.status]]))
 
   return list.map(one => {
-    const state = ends.get(one.agentId)
+    if (!stops.has(one.agentId)) {
+      return isOpen(one) && one.listed === true ? { ...one, state: 'aborted', endedAt: now, durationMs: elapsedOf(one, now) } : one
+    }
 
-    return one.state === 'running' && state !== undefined ? { ...one, state, endedAt: now, durationMs: elapsedOf(one, now) } : one
+    const state = stops.get(one.agentId)
+    const seen: AgentRun = one.listed === true ? one : { ...one, listed: true }
+
+    if (!isOpen(one) || state === undefined || (one.state === 'idle' && state === 'idle')) {
+      return seen
+    }
+
+    // Idle is no end: its clock stops until a message or a tool resumes it.
+    return state === 'idle' ? { ...seen, state, durationMs: elapsedOf(one, now) } : { ...seen, state, endedAt: now, durationMs: elapsedOf(one, now) }
   })
 }
 
@@ -169,6 +184,10 @@ export function fmtTokens(n: number | null | undefined): string {
 export function glyphOf(state: AgentRunState): { glyph: string; color: string } {
   if (state === 'running') {
     return { glyph: '●', color: 'permission' }
+  }
+
+  if (state === 'idle') {
+    return { glyph: '○', color: 'inactive' }
   }
 
   // Cancelled by the person: a warning, red is for failures.

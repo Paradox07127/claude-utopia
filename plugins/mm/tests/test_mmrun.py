@@ -997,6 +997,8 @@ with tempfile.TemporaryDirectory() as root:
         expect("codex 续做:-p mmwt-<子rid>、resume、运行时 profile 存在",
                (r.returncode, "-p" in last and last[last.index("-p") + 1] == f"mmwt-{xc}", "resume" in last,
                 f"profile-present:mmwt-{xc}" in last), (0, True, True, True))
+        first = ([c.splitlines() for c in read(xrec).split("---\n")[:-1]] or [[]])[0]
+        expect("codex run 与续做:不带 skills.include_instructions", ["skills.include_instructions=false" in a for a in (first, last)], [False, False])
         expect("codex 续做:结束后 profile 已删除", xhome.joinpath(".codex", f"mmwt-{xc}.config.toml").exists(), False)
         expect("codex 续做:子 run 的 wt 与父相同",
                next((l for l in read(pathlib.Path(root, xp, "run.meta")).splitlines() if l.startswith("wt=")), "x")
@@ -1665,6 +1667,11 @@ with tempfile.TemporaryDirectory() as qroot, tempfile.TemporaryDirectory() as qt
     expect("额度用尽:原因写进 codex.skip", "weekly quota 100%" in (skipf.read_text() if skipf.exists() else ""), True)
     reasonf = pathlib.Path(qroot, rid, "codex.reason")
     expect("额度用尽:codex.reason 与 codex.skip 同文", reasonf.exists() and reasonf.read_text() == skipf.read_text(), True)
+    evf = pathlib.Path(qroot, rid, "codex.events.jsonl")
+    qevs = [json.loads(l) for l in evf.read_text().splitlines()] if evf.exists() else []
+    expect("额度用尽:codex.events.jsonl 是 task_started 加 stopped 的 task_notification,summary 是跳过原因",
+           ([e["type"] for e in qevs], qevs[-1].get("status") if qevs else None, qevs[-1].get("summary") if qevs else None),
+           (["task_started", "task_notification"], "stopped", skipf.read_text().strip() if skipf.exists() else ""))
     expect("额度用尽:wait 把 SKIP 当已结束", (w.returncode if w else None, "TIMEOUT" in (w.stdout if w else "")), (0, False))
     sl = [l for l in mmrun(qroot, "status", rid).stdout.splitlines() if l.startswith("codex")]
     expect("status:SKIP:quota 行带原因", bool(sl) and "SKIP:quota" in sl[0] and "weekly quota 100%" in sl[0], True)
@@ -1850,10 +1857,11 @@ echo ok > "$out"; echo '{"type":"thread.started","thread_id":"t-mcp"}'
     def cvals(argv):
         return sorted(argv[i + 1] for i, x in enumerate(argv[:-1]) if x == "-c")
     LOCK = sorted(['approval_policy="never"', 'approvals_reviewer="user"', "features.plugins=false",
-                   "mcp_servers.srv-a.enabled=false", "mcp_servers.srv_b.enabled=false"])
+                   "mcp_servers.srv-a.enabled=false", "mcp_servers.srv_b.enabled=false",
+                   "skills.include_instructions=false"])
 
     r, mrid, st, calls = mrun("start", "--models", "codex", "--dir", str(mwork))
-    expect("关 MCP:exec 带上两个启用 server 的 -c、插件与审批覆盖,已停用的不带",
+    expect("关 MCP:exec 带上两个启用 server 的 -c、插件、审批与 skills 目录覆盖,已停用的不带",
            (st, len(calls), cvals((calls or [[]])[0])), ("DONE", 1, LOCK))
     p0 = (mprm.read_text().split("=====\n") if mprm.exists() else [""])[0]
     expect("关 MCP:codex 的 prompt 开头一句说明没有 MCP 工具,原文在后",
@@ -1868,8 +1876,12 @@ echo ok > "$out"; echo '{"type":"thread.started","thread_id":"t-mcp"}'
     expect("带了参数仍有启用的 server:不启动、FAIL:mcp、stderr 一行只有名字",
            (st, calls, r.stderr.splitlines()),
            ("FAIL:mcp", [], ["mmrun: codex not started: MCP servers still enabled under mmrun's overrides: srv-a"]))
-    r, _, st, calls = mrun("start", "--models", "codex", "--dir", str(mwork), scen="fail")
+    r, frid, st, calls = mrun("start", "--models", "codex", "--dir", str(mwork), scen="fail")
     expect("mcp list 失败:不启动、FAIL:mcp、stderr 一行", (st, calls, len(r.stderr.splitlines())), ("FAIL:mcp", [], 1))
+    fev = pathlib.Path(mroot, frid, "codex.events.jsonl")
+    fevs = [json.loads(l) for l in fev.read_text().splitlines()] if fev.exists() else []
+    expect("mcp list 失败:events 是 task_started 加 failed 的 task_notification",
+           [(e["type"], e.get("status")) for e in fevs], [("task_started", None), ("task_notification", "failed")])
 
     for name, item, want in (("含", "mcp_tool_call", True), ("不含", "command_execution", False)):
         wd = pathlib.Path(mroot, f"mcpwarn-{int(want)}"); wd.mkdir()
@@ -2024,6 +2036,336 @@ with tempfile.TemporaryDirectory() as ahome:
     subprocess.run([str(MMRUN), "review", "--dir", str(pathlib.Path(ahome, "nope"))], capture_output=True, text=True,
                    env=dict(aenv, MMRUN_HOME=str(aroot)))
     expect("自动清理:设了 MMRUN_HOME 不触发", a3.exists(), True)
+
+# ---------- <model>.events.jsonl:哪个 Claude 会话发起、codex 跑到哪、怎么结束 ----------
+with tempfile.TemporaryDirectory() as eroot, tempfile.TemporaryDirectory() as etmp:  # 假二进制不能放在 MMRUN_HOME 下:围栏禁读该目录
+    etmp = pathlib.Path(os.path.realpath(etmp)); ework = etmp / "work"; ework.mkdir()
+    ecodex, egrok, efail, eslow = etmp / "codex", etmp / "grok", etmp / "grok-fail", etmp / "grok-slow"
+    cmd = "/bin/zsh -lc \"git status --short\""
+    elines = [{"type": "thread.started", "thread_id": "t-ev"},
+              {"type": "item.started", "item": {"id": "item_1", "type": "command_execution", "command": cmd}},
+              {"type": "item.completed", "item": {"id": "item_1", "type": "command_execution", "command": cmd, "exit_code": 0}},
+              {"type": "item.completed", "item": {"id": "item_2", "type": "agent_message", "text": "Looks fine.\nsecond line"}},
+              {"type": "item.started", "item": {"id": "item_3", "type": "command_execution", "command": "/bin/bash -lc 'ls -la'"}},
+              {"type": "item.completed", "item": {"id": "item_3", "type": "command_execution", "command": "/bin/bash -lc 'ls -la'"}}]
+    erollout = etmp / "codex-home/sessions/2026/10/15/rollout-x-t-ev.jsonl"
+    def etok(out, total):
+        return {"timestamp": "2026-10-15T00:00:00Z", "type": "event_msg", "payload": {"type": "token_count", "info": None if out is None else {
+            "total_token_usage": {"input_tokens": total - out, "cached_input_tokens": 0, "output_tokens": out, "reasoning_output_tokens": 0, "total_tokens": total},
+            "last_token_usage": {"output_tokens": 1}}}}
+    rwrites = {0: etok(11, 1000), 3: etok(45, 2400), 4: etok(None, 0)}  # 在第 i 条 codex 行之后写进 rollout;info 为 null 的行不算
+    ecodex.write_text("#!/bin/sh\n" + MCP_NONE + 'cat > /dev/null\nout=""; prev=""\nfor a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done\n'
+                      + f'mkdir -p {shlex.quote(str(erollout.parent))}\n'
+                      + "".join(f"printf '%s\\n' {shlex.quote(json.dumps(l))}\n"
+                                + (f"printf '%s\\n' {shlex.quote(json.dumps(rwrites[i]))} >> {shlex.quote(str(erollout))}\n" if i in rwrites else "")
+                                + "sleep 1.2\n" for i, l in enumerate(elines))
+                      + 'echo ok > "$out"\n'
+                      + f"printf '%s\\n' {shlex.quote(json.dumps({'type': 'turn.completed', 'usage': {'input_tokens': 100, 'cached_input_tokens': 20, 'output_tokens': 7}}))}\n")
+    egrok.write_text("#!/bin/sh\nprintf '{\"text\":\"ok\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}'\n")
+    efail.write_text("#!/bin/sh\necho '{\"type\":\"error\",\"message\":\"boom happened\"}'\nexit 1\n")
+    eslow.write_text("#!/bin/sh\nsleep 30\n")
+    ehome = etmp / "home"; ehome.joinpath(".grok").mkdir(parents=True)
+    elive, enosess = etmp / "grok-live", etmp / "grok-nosess"
+    def gout(**kw): return f"printf '%s\\n' {shlex.quote(json.dumps(kw))}\n"
+    def gchat(**kw): return f"printf '%s\\n' {shlex.quote(json.dumps(kw))} >> \"$d/chat_history.jsonl\"\n"
+    elive.write_text('#!/bin/sh\nsid=""; prev=""\nfor a in "$@"; do [ "$prev" = -s ] && sid="$a"; prev="$a"; done\n'
+                     'd="$HOME/.grok/sessions/%2Fx/$sid"; mkdir -p "$d"\n'
+                     + gchat(type="system", content="sys") + gchat(type="user", content="q")
+                     + gout(type="tool_call", toolCallId="c1", toolName="grep") + "sleep 1.2\n" + gout(type="tool_call_update", toolCallId="c1", status="completed")
+                     + gchat(type="reasoning", summary=[{"type": "summary_text", "text": "Thinking first.\nx"}]) + "sleep 2.2\n"
+                     + gchat(type="assistant", content="Looking at mmrun.\nmore", tool_calls=[{"id": "c1"}])
+                     + gout(type="tool_call", toolCallId="c2", toolName="read_file") + "sleep 1.2\n" + gout(type="tool_call_update", toolCallId="c2", status="completed")
+                     + gchat(type="tool_result", content="file body") + gchat(type="assistant", content="") + "sleep 2.5\n"
+                     + gout(type="text", data="ok") + gout(type="end", stopReason="end_turn", usage={"input_tokens": 5, "output_tokens": 3}))
+    enosess.write_text("#!/bin/sh\nsleep 2.5\nprintf '{\"text\":\"ok\"}'\n")
+    for f in (ecodex, egrok, efail, eslow, elive, enosess): f.chmod(0o755)
+    eenv = dict(os.environ, MMRUN_HOME=eroot, MMRUN_D=str(PLUGIN / "mmrun.d"), CODEX_HOME=str(etmp / "codex-home"),
+                CODEX_BIN=str(ecodex), GROK_BIN=str(egrok), MMRUN_PROGRESS_SECS="1", CLAUDE_CODE_SESSION_ID="test-session")
+    def estart(models, tag, e=eenv, wait=True):
+        r = subprocess.run([str(MMRUN), "start", "--models", models, "--dir", str(ework), "--tag", tag], input="q\n",
+                           capture_output=True, text=True, env=e, timeout=60)
+        rid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+        if wait and rid != "missing": mmrun(eroot, "wait", rid, "--timeout", "60")
+        return rid
+    def events(rid, m, until="task_notification"):  # wait 只看 status:末行可能稍后才写,等到末行是 until
+        f = pathlib.Path(eroot, rid, f"{m}.events.jsonl")
+        evs = []
+        for _ in range(50):
+            evs = [json.loads(l) for l in f.read_text().splitlines()] if f.exists() else []
+            if evs and evs[-1]["type"] == until: break
+            time.sleep(0.2)
+        return evs
+
+    rid = estart("codex", "evt-codex")
+    evs = events(rid, "codex"); first = evs[0] if evs else {}; last = evs[-1] if evs else {}
+    expect("events codex:首行 task_started,带 task_id、provider、mode、tag、claude_session",
+           tuple(first.get(k) for k in ("type", "task_id", "provider", "mode", "description", "claude_session")),
+           ("task_started", f"{rid}/codex", "codex", "start", "evt-codex", "test-session"))
+    prog = [e for e in evs if e["type"] == "task_progress"]
+    expect("events codex:有 task_progress 的 tool_uses ≥ 1、last_tool_name 以 command_execution: 开头",
+           any(e["usage"]["tool_uses"] >= 1 and e["last_tool_name"].startswith("command_execution: ") for e in prog), True)
+    expect("events codex:last_tool_name 去掉 /bin/zsh -lc、/bin/bash -lc 与引号",
+           {"command_execution: git status --short", "command_execution: ls -la"} <= {e["last_tool_name"] for e in prog}, True)
+    expect("events codex:summary 取最后一条 agent_message 的首行", "Looks fine." in {e["summary"] for e in prog}, True)
+    expect("events codex:相邻 task_progress 不重复",
+           all(a != b for a, b in zip([{k: v for k, v in e.items() if k != "ts"} for e in prog],
+                                      [{k: v for k, v in e.items() if k != "ts"} for e in prog][1:])), True)
+    expect("events codex:task_progress 带 rollout 里最后一条非空 token_count 的 output/total_tokens 与 transcript_path",
+           any((e["usage"].get("output_tokens"), e["usage"].get("total_tokens"), e.get("transcript_path")) == (45, 2400, str(erollout))
+               for e in prog), True)
+    expect("events codex:task_notification 的 transcript_path 是 rollout 文件", last.get("transcript_path"), str(erollout))
+    expect("events codex:末行 task_notification completed,usage 带 total/output_tokens 与 duration_ms、只有一条",
+           (last.get("type"), last.get("status"), last.get("summary"), (last.get("usage") or {}).get("total_tokens"),
+            (last.get("usage") or {}).get("output_tokens"), isinstance((last.get("usage") or {}).get("duration_ms"), int),
+            sum(e["type"] == "task_notification" for e in evs)),
+           ("task_notification", "completed", "", 107, 7, True, 1))
+    evf = pathlib.Path(eroot, rid, "codex.events.jsonl"); size = evf.stat().st_size if evf.exists() else -1
+    time.sleep(2)
+    expect("events codex:结束后 watcher 不再写", evf.stat().st_size if evf.exists() else -1, size)
+
+    rid = estart("grok", "evt-grok", e={k: v for k, v in eenv.items() if k != "CLAUDE_CODE_SESSION_ID"})
+    evs = events(rid, "grok")
+    expect("events grok:只有 task_started 与 completed 的 task_notification", ([e["type"] for e in evs], evs[-1].get("status") if evs else None),
+           (["task_started", "task_notification"], "completed"))
+    expect("events:没有 CLAUDE_CODE_SESSION_ID 时 claude_session 是空串", evs[0].get("claude_session") if evs else None, "")
+
+    # grok --output-format streaming-json:每行一个 ACP 事件,末行 end 带 usage、cost,有 --json-schema 时带 structuredOutput;json 格式只在结束时打一个对象
+    estream = etmp / "grok-stream"
+    turn_usage = {"type": "usage", "usage": {"input_tokens": 1, "output_tokens": 1}}
+    end = {"type": "end", "stopReason": "end_turn", "usage": {"input_tokens": 50, "output_tokens": 9}, "total_cost_usd": 0.01}
+    slines = [[{"type": "available_commands", "tools": ["read_file", "grep"]}, turn_usage,
+               {"type": "tool_call", "toolCallId": "c1", "toolName": "read_file", "status": "pending", "rawInput": {"target_file": "a"}},
+               {"type": "tool_call_update", "toolCallId": "c1", "status": None},
+               {"type": "tool_call_update", "toolCallId": "c1", "status": "completed"}],
+              [{"type": "tool_call", "toolCallId": "c2", "toolName": "grep", "status": "pending"},
+               {"type": "tool_call_update", "toolCallId": "c2", "status": "failed"}],
+              [{"type": "text", "data": "Done."}, {"type": "text", "data": "\nAll good"}, turn_usage]]
+    pl = lambda l: f"printf '%s\\n' {shlex.quote(json.dumps(l))}\n"
+    jend = {k: v for k, v in end.items() if k != "type"} | {"text": "Done.\nAll good"}
+    estream.write_text('#!/bin/sh\nfmt=""; schema=""; prev=""\nfor a in "$@"; do [ "$prev" = --output-format ] && fmt="$a"; '
+                       '[ "$prev" = --json-schema ] && schema=1; prev="$a"; done\n'
+                       + 'if [ "$fmt" != streaming-json ]; then\n'
+                       + f'  if [ -n "$schema" ]; then {pl(dict(jend, structuredOutput={"answer": "yes"}))}  else {pl(jend)}  fi; exit 0\nfi\n'
+                       + "sleep 1.2\n".join("".join(pl(l) for l in g) for g in slines) + "sleep 1.2\n"
+                       + f'if [ -n "$schema" ]; then {pl(dict(end, structuredOutput={"answer": "yes"}))}else {pl(end)}fi\n')
+    estream.chmod(0o755)
+    senv = {**eenv, "GROK_BIN": str(estream)}
+    rid = estart("grok", "evt-stream", e=senv)
+    evs = events(rid, "grok"); prog = [e for e in evs if e["type"] == "task_progress"]
+    expect("events grok:task_progress 依次报 read_file 1 次、grep 2 次(completed 与 failed 都算)",
+           [(e["usage"]["tool_uses"], e["last_tool_name"]) for e in prog], [(1, "read_file"), (2, "grep")])
+    expect("events grok:末行 task_notification 取 end 行的 usage", (evs[-1].get("usage") or {}).get("total_tokens") if evs else None, 59)
+    gout = pathlib.Path(eroot, rid, "grok.out")
+    expect("grok streaming:无 schema 时 .out 是各段 text 拼接", gout.read_text() if gout.exists() else None, "Done.\nAll good\n")
+    sch = etmp / "answer.schema.json"; sch.write_text(json.dumps({"type": "object", "required": ["answer"]}))
+    r = subprocess.run([str(MMRUN), "start", "--models", "grok", "--dir", str(ework), "--tag", "evt-schema", "--schema", str(sch)],
+                       input="q\n", capture_output=True, text=True, env=senv, timeout=60)
+    rid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+    mmrun(eroot, "wait", rid, "--timeout", "60")
+    gj, gc = pathlib.Path(eroot, rid, "grok.json"), pathlib.Path(eroot, rid, "grok.cost")
+    expect("grok streaming:有 schema 时 .json 取 end 行的 structuredOutput、cost 取 end 行",
+           (json.loads(gj.read_text()) if gj.exists() else None, gc.read_text().strip() if gc.exists() else None), ({"answer": "yes"}, "0.01"))
+
+    rid = estart("grok", "evt-grok-live", e=dict(eenv, HOME=str(ehome), GROK_BIN=str(elive)))
+    evs = events(rid, "grok"); prog = [e for e in evs if e["type"] == "task_progress"]
+    gsid = pathlib.Path(eroot, rid, "grok.session").read_text().strip() if pathlib.Path(eroot, rid, "grok.session").exists() else "missing"
+    gchatf = str(ehome / ".grok/sessions/%2Fx" / gsid / "chat_history.jsonl")
+    expect("events grok:task_progress 带 tool_uses 2、最后的工具名、最后一条非空 assistant 的首行、chat_history 路径",
+           any((e["usage"], e.get("last_tool_name"), e.get("summary"), e.get("transcript_path"))
+               == ({"tool_uses": 2}, "read_file", "Looking at mmrun.", gchatf) for e in prog), True)
+    expect("events grok:assistant 之前 summary 取最后一条 reasoning 的首行",
+           any(e.get("summary") == "Thinking first." and e.get("transcript_path", "").endswith("/chat_history.jsonl") for e in prog), True)
+    expect("events grok:相邻 task_progress 不重复",
+           all(a != b for a, b in zip([{k: v for k, v in e.items() if k != "ts"} for e in prog],
+                                      [{k: v for k, v in e.items() if k != "ts"} for e in prog][1:])), True)
+    expect("events grok:task_notification completed,transcript_path 同上",
+           (evs[-1].get("type"), evs[-1].get("status"), evs[-1].get("transcript_path")) if evs else None, ("task_notification", "completed", gchatf))
+
+    rid = estart("grok", "evt-grok-nosess", e=dict(eenv, HOME=str(ehome), GROK_BIN=str(enosess)))
+    evs = events(rid, "grok")
+    expect("events grok:会话目录始终不出现时没有 task_progress,task_notification 没有 transcript_path",
+           ([e["type"] for e in evs], "transcript_path" in evs[-1] if evs else None), (["task_started", "task_notification"], False))
+
+    rid = estart("grok", "evt-fail", e=dict(eenv, GROK_BIN=str(efail)))
+    evs = events(rid, "grok"); rf = pathlib.Path(eroot, rid, "grok.reason")
+    rline = rf.read_text().splitlines()[0] if rf.exists() else None
+    expect("events 失败:末行 task_notification failed,summary 是 grok.reason 首行",
+           ((evs[-1].get("type"), evs[-1].get("status"), evs[-1].get("summary")) if evs else None, bool(rline)),
+           (("task_notification", "failed", rline), True))
+
+    rid = estart("grok", "evt-cancel", e=dict(eenv, GROK_BIN=str(eslow)), wait=False)
+    events(rid, "grok", until="task_started")
+    mmrun(eroot, "cancel", rid)
+    evs = events(rid, "grok")
+    expect("events cancel:末行 task_notification stopped、summary 说明、没有 usage",
+           ((evs[-1].get("type"), evs[-1].get("status"), evs[-1].get("summary"), "usage" in evs[-1]) if evs else None),
+           ("task_notification", "stopped", "cancelled by mmrun cancel", False))
+
+# ---------- review material: noise files left out, a large change split into parts by files ----------
+with tempfile.TemporaryDirectory() as sroot, tempfile.TemporaryDirectory() as stmp:
+    stmp = pathlib.Path(os.path.realpath(stmp))
+    sgrok = stmp / "grok"; sgrok.write_text("#!/bin/sh\nprintf '{\"text\":\"ok\"}'\n"); sgrok.chmod(0o755)
+    senv = dict(os.environ, MMRUN_HOME=sroot, MMRUN_D=str(PLUGIN / "mmrun.d"), GROK_BIN=str(sgrok))
+    def srepo(name, files):
+        repo = stmp / name; git("init", "-q", str(repo))
+        repo.joinpath("seed.txt").write_text("s\n"); git("-C", str(repo), "add", "seed.txt"); git("-C", str(repo), "commit", "-qm", "init")
+        for p, text in files.items():
+            repo.joinpath(p).parent.mkdir(parents=True, exist_ok=True); repo.joinpath(p).write_text(text)
+        return repo
+    def sreview(repo, *extra):
+        r = subprocess.run([str(MMRUN), "review", "--models", "grok", "--dir", str(repo), *extra],
+                           capture_output=True, text=True, env=senv, stdin=subprocess.DEVNULL, timeout=120)
+        rids = [l.split()[1] for l in r.stdout.splitlines() if l.startswith("RUN ")]
+        for rid in rids: mmrun(sroot, "wait", rid, "--timeout", "60")
+        return r, [pathlib.Path(sroot, rid, "prompt.md").read_text() for rid in rids], rids
+    def smeta(rid, key):
+        return next((l.split("=", 1)[1] for l in pathlib.Path(sroot, rid, "run.meta").read_text().splitlines() if l.startswith(key + "=")), None)
+    def material(prompt):
+        return prompt.split("<review_input>", 1)[-1]
+    def big(tag, kb):  # about kb KB of distinct lines, each carrying tag
+        return "".join(f"{tag} line {k:06d} {'x' * 80}\n" for k in range(kb * 1024 // 100))
+
+    noise = {"package-lock.json": "LOCK-MARK\n", "conf.json": '{"JSON-MARK": 1}\n', "tests/fixtures/f.txt": "FIXTURE-MARK\n",
+             "web/app.min.js": "MINIFIED-MARK\n", "src/a.py.orig": "ORIG-MARK\n", ".notes/n.md": "NOTES-MARK\n", "yarn.lock": "YARN-MARK\n"}
+    repo = srepo("noise", {"src/a.py": "SRC-MARK\n", "tests/test_a.py": "TEST-MARK\n", **noise})
+    r, ps, rids = sreview(repo)
+    m = material(ps[0]) if ps else ""
+    expect("review 噪声文件:一个 run,源码和小测试在材料里", (r.returncode, len(ps), "SRC-MARK" in m, "TEST-MARK" in m), (0, 1, True, True))
+    expect("review 噪声文件:锁文件、JSON、测试数据、压缩产物、过渡文件不在材料里",
+           [k for k in ("LOCK-MARK", "JSON-MARK", "FIXTURE-MARK", "MINIFIED-MARK", "ORIG-MARK", "NOTES-MARK", "YARN-MARK") if k in m], [])
+    head = ps[0].split("<review_input>", 1)[0] if ps else ""
+    expect("review 噪声文件:prompt 列出被略去的文件和读法",
+           ("## Files left out of the material" in head, all(p in head for p in noise), "git diff HEAD --" in head), (True, True, True))
+    expect("review 噪声文件:stdout 有 LEFT OUT 行,没有 PART 行",
+           (any(l.startswith("LEFT OUT") for l in r.stdout.splitlines()), "PART " in r.stdout), (True, False))
+
+    expect("review 一段:run.meta 没有 group", smeta(rids[0], "group") if rids else None, "")
+
+    repo = srepo("attrs", {".gitattributes": "gen/** linguist-generated\nthird/** linguist-vendored\n", "src/b.py": "ATTR-SRC\n",
+                           "gen/api.py": "GEN-MARK\n", "third/lib.py": "VENDORED-MARK\n"})
+    git("-C", str(repo), "add", ".gitattributes"); git("-C", str(repo), "commit", "-qm", "attrs")
+    r, ps, rids = sreview(repo)
+    m = material(ps[0]) if ps else ""
+    expect("review .gitattributes:linguist-generated / linguist-vendored 的文件列为 generated",
+           ("ATTR-SRC" in m, "GEN-MARK" in m, "VENDORED-MARK" in m, "gen/api.py — generated" in ps[0] if ps else None), (True, False, False, True))
+
+    fn = "def f(x):\n    y = 1\n" + "".join(f"    y += {k}\n" for k in range(30)) + "    return y  # FAR-MARK\n"
+    for name, extra in (("ctx-small", {}), ("ctx-big", {"z/other.py": big("OTHER", 60)})):
+        repo = srepo(name, {"m.py": fn, **extra})
+        git("-C", str(repo), "add", "-A"); git("-C", str(repo), "commit", "-qm", "f")
+        repo.joinpath("m.py").write_text(fn.replace("    y += 1\n", "    y += 100\n"))
+        if extra: repo.joinpath("z/other.py").write_text(big("OTHER2", 60))
+        r, ps, rids = sreview(repo)
+        want = name == "ctx-small"
+        expect(f"review {'小改动带整个函数' if want else '大改动只带 3 行上下文'}", "FAR-MARK" in "".join(material(p) for p in ps), want)
+
+    repo = srepo("quoted", {"a.json": '{"Q-JSON": 1}\n', "src/中文.py": "CJK-NAME-MARK\n"})
+    r, ps, rids = sreview(repo)
+    m = material(ps[0]) if ps else ""
+    expect("review 中文文件名:不被并进前一个文件的段,照样进材料", ("CJK-NAME-MARK" in m, "Q-JSON" in m, "src/中文.py" in m), (True, False, True))
+
+    repo = srepo("json-only",{"conf.json": '{"ONLY-JSON": 1}\n'})
+    r, ps, rids = sreview(repo)
+    expect("review 只改了 JSON:照样审它", (r.returncode, len(ps), "ONLY-JSON" in material(ps[0]) if ps else None), (0, 1, True))
+
+    repo = srepo("split", {"a/one.py": big("ONE", 100), "b/two.py": big("TWO", 100), "c/three.py": big("THREE", 100),
+                           "c/tests/test_three.py": "SMALLTEST-MARK\n", "d/tests/test_huge.py": big("HUGETEST", 120),
+                           "e/huge.py": big("HUGE", 450)})
+    r, ps, rids = sreview(repo)
+    ms = [material(p) for p in ps]
+    expect("review 大改动:按文件分成 3 段,各起一个 run,各段只含自己的文件",
+           (r.returncode, len(ps), [[t for t in ("ONE line", "TWO line", "THREE line") if t in x] for x in ms]),
+           (0, 3, [["ONE line"], ["TWO line"], ["THREE line"]]))
+    expect("review 大改动:每段材料不超过 150 KB", [len(x.encode()) <= 150_000 for x in ms], [True] * 3)
+    expect("review 大改动:小测试跟着同目录的源码段", ["SMALLTEST-MARK" in x for x in ms], [False, False, True])
+    expect("review 大改动:装不下的测试和单个超大文件不进材料,列为略去",
+           (any("HUGETEST line" in x or "HUGE line" in x for x in ms),
+            all("d/tests/test_huge.py" in p.split("<review_input>")[0] and "e/huge.py" in p.split("<review_input>")[0] for p in ps)),
+           (False, True))
+    expect("review 大改动:prompt 写明第几段、列出其它段的文件",
+           ("part 1 of 3" in ps[0] and "b/two.py" in ps[0].split("<review_input>")[0], "part 3 of 3" in ps[2] if len(ps) > 2 else None),
+           (True, True))
+    expect("review 大改动:stdout 有 PART 行,源码没审时有 NOTE 行",
+           ([l.split()[1] for l in r.stdout.splitlines() if l.startswith("PART ")],
+            any(l.startswith("NOTE") and "e/huge.py" in l for l in r.stdout.splitlines())),
+           (["1/3", "2/3", "3/3"], True))
+
+    expect("review 大改动:各段 run.meta 的 group 按顺序列出全部段", [smeta(x, "group") for x in rids], [",".join(rids)] * 3)
+    rep = mmrun(sroot, "report", rids[-1]).stdout if rids else ""
+    expect("review 大改动:report 一次给出全部段", (rep.count("# Multi-model review report"), all(f"Part {k} of 3" in rep for k in (1, 2, 3)),
+           all(x in rep for x in rids)), (1, True, True))
+
+    repo = srepo("oversize", {"a/one.py": big("ONE", 20), "b/big.py": big("BIG", 200)})
+    r, ps, rids = sreview(repo)
+    expect("review 单个文件超过 150 KB、不到 400 KB:自成一段",
+           (r.returncode, [[t for t in ("ONE line", "BIG line") if t in material(p)] for p in ps]), (0, [["ONE line"], ["BIG line"]]))
+
+    repo = srepo("overflow", {**{f"d{k}/f.py": big(f"F{k}", 100) for k in range(6)}, **{f"j/c{k:02d}.json": "{}\n" for k in range(55)}})
+    r, ps, rids = sreview(repo)
+    expect("review 超过 4 段:只起 4 个 run,其余源码列进 NOTE",
+           (r.returncode, len(ps), any(l.startswith("NOTE") and "d5/f.py" in l for l in r.stdout.splitlines())), (0, 4, True))
+    head = ps[0].split("<review_input>", 1)[0] if ps else ""
+    expect("review 略去列表过长:没审的源码排在最前,截断处写明还有几个", ("d5/f.py" in head, "more not listed" in head), (True, True))
+
+    repo = srepo("firstfit", {**{f"d{k}/f.py": big(f"F{k}", 100) for k in range(4)}, **{f"e{k}/g.py": big(f"G{k}", 40) for k in range(3)}})
+    r, ps, rids = sreview(repo)
+    expect("review 4 段满后:放得进前面段的源码照样进材料,不报超限",
+           (len(ps), sum(f"G{k} line" in material(p) for p in ps for k in range(3)), "NOTE" in r.stdout), (4, 3, False))
+
+    repo = srepo("toolarge", {"a/huge.py": big("ALONE", 450), "a/tests/test_a.py": "T\n"})
+    r, ps, rids = sreview(repo)
+    expect("review 没有源码装得下:报错指向 NOTE 行,不说每个文件都超限",
+           (r.returncode != 0, "NOTE" in r.stdout, "no source diff fits" in r.stderr), (True, True, True))
+
+    repo = srepo("cjk-ctx", {"m.py": "def f(x):\n    y = 1\n" + "".join(f"    y += {k}\n" for k in range(30)) + "    return y  # FAR-MARK\n",
+                             "z/doc.md": "中" * 15000 + "\n"})
+    git("-C", str(repo), "add", "-A"); git("-C", str(repo), "commit", "-qm", "f")
+    repo.joinpath("m.py").write_text(repo.joinpath("m.py").read_text().replace("    y += 1\n", "    y += 100\n"))
+    repo.joinpath("z/doc.md").write_text("文" * 15000 + "\n")
+    r, ps, rids = sreview(repo)
+    expect("review 中文改动按字节算:超过 50 KB 不带整个函数", "FAR-MARK" in "".join(material(p) for p in ps), False)
+
+    repo = srepo("relative", {"sub/.gitattributes": "gen.py linguist-generated\n", "sub/a.py": "REL-SRC\n"})
+    git("-C", str(repo), "add", "-A"); git("-C", str(repo), "commit", "-qm", "attrs"); git("-C", str(repo), "config", "diff.relative", "true")
+    repo.joinpath("sub/gen.py").write_text("REL-GEN\n"); repo.joinpath("sub/a.py").write_text("REL-SRC2\n")
+    r, ps, rids = sreview(repo / "sub")
+    m = material(ps[0]) if ps else ""
+    expect("review diff.relative=true:路径仍从仓库根算,.gitattributes 照样生效", ("REL-SRC2" in m, "REL-GEN" in m, "sub/a.py" in m), (True, False, True))
+
+    repo = srepo("merge", {"src.py": "base\n", "conf.json": '{"v": 0}\n'})
+    git("-C", str(repo), "add", "-A"); git("-C", str(repo), "commit", "-qm", "base")
+    git("-C", str(repo), "checkout", "-qb", "side")
+    repo.joinpath("src.py").write_text("side\n"); repo.joinpath("conf.json").write_text('{"v": 1}\n')
+    git("-C", str(repo), "commit", "-qam", "side"); git("-C", str(repo), "checkout", "-q", "-")
+    repo.joinpath("src.py").write_text("main\n"); repo.joinpath("conf.json").write_text('{"v": 2}\n')
+    git("-C", str(repo), "commit", "-qam", "main")
+    subprocess.run(["git", "-C", str(repo), "merge", "-q", "side"], capture_output=True)
+    repo.joinpath("src.py").write_text("MERGED-SRC\n"); repo.joinpath("conf.json").write_text('{"MERGED-JSON": 3}\n')
+    git("-C", str(repo), "commit", "-qam", "merge")
+    r, ps, rids = sreview(repo, "--commit", "HEAD")
+    m = material(ps[0]) if ps else ""
+    expect("review 合并提交 (diff --cc):按文件切,JSON 照样略去", ("MERGED-SRC" in m, "MERGED-JSON" in m), (True, False))
+
+    prun = pathlib.Path(sroot, "pr-run"); prun.mkdir()
+    repo = srepo("patchscope", {})
+    prun.joinpath("run.meta").write_text(f"runid=pr-run\nmode=run\nmodels=grok\nworkdir={repo}\nbase_sha=\n")
+    prun.joinpath("grok.patch").write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+P\n"
+                                           "diff --git a/c.json b/c.json\n--- a/c.json\n+++ b/c.json\n@@ -0,0 +1 @@\n+{}\n")
+    r, ps, rids = sreview(repo, "--patch", "pr-run")
+    head = ps[0].split("<review_input>", 1)[0] if ps else ""
+    expect("review --patch 略去文件:写明仓库里的文件是打补丁前的版本", "before the patch" in head, True)
+    repo = srepo("stagedscope", {"a.py": "S\n", "c.json": "{}\n"})
+    git("-C", str(repo), "add", "-A")
+    r, ps, rids = sreview(repo, "--staged")
+    head = ps[0].split("<review_input>", 1)[0] if ps else ""
+    expect("review --staged 略去文件:写明没有 git 时工作区文件可能不是被审的版本", "may differ" in head, True)
+
+    repo = srepo("full", {"m/a.py": "FULL-SRC\n", "m/fixtures/x.txt": "FULL-FIXTURE\n", "m/conf.json": '{"FULL-JSON": 1}\n'})
+    git("-C", str(repo), "add", "-A"); git("-C", str(repo), "commit", "-qm", "m")
+    r, ps, rids = sreview(repo, "--paths", "m", "--full")
+    m = material(ps[0]) if ps else ""
+    expect("review --full:源码在材料里,测试数据和 JSON 不在", (r.returncode, "FULL-SRC" in m, "FULL-FIXTURE" in m, "FULL-JSON" in m),
+           (0, True, False, False))
 
 print(f"\n{len(failures)} failed" if failures else "\nall passed")
 raise SystemExit(1 if failures else 0)

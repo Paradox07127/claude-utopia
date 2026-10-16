@@ -3,7 +3,9 @@ import { describe, expect, test } from 'claude-code/testing'
 import { widthOf } from '../hooks/agent-model'
 import type { Line } from '../hooks/board'
 import { setLang } from '../hooks/i18n'
-import { drawHotspotsDesktop, drawTimelineDesktop, hotspotLines, latestMainTurnId, timelineLines } from '../hooks/timeline-view'
+import { clockOf } from '../hooks/board'
+import { groupEvents, parseLedger } from '../hooks/events'
+import { drawEventsDesktop, drawHotspotsDesktop, drawTimelineDesktop, eventLines, hotspotLines, latestMainTurnId, timelineLines } from '../hooks/timeline-view'
 import type { TimelineStep, TimelineTool, TimelineTurn } from '../types'
 import { FILL, TRACK } from '../hooks/desktop-svg'
 
@@ -437,7 +439,7 @@ describe('timeline view, desktop', () => {
     const svgs = nodesOf(drawn, 'Svg')
     const text = stringsOf(drawn).join('\n')
 
-    expect(svgs, 'the axis; #0, Read ×3, Grep; #1, Bash, the fork; the compaction; #2').toHaveLength(9)
+    expect(svgs, 'the legend’s 3 swatches; the axis; #0, Read ×3, Grep; #1, Bash, the fork; the compaction; #2').toHaveLength(12)
 
     for (const svg of svgs) {
       const colors = String(svg.props!.source).match(/#[0-9A-Fa-f]{6}/g) ?? []
@@ -447,12 +449,24 @@ describe('timeline view, desktop', () => {
       expect(String(svg.props!.alt)).not.toBe('')
     }
 
+    expect(svgs.slice(0, 3).map(svg => svg.props!.alt)).toEqual(['关键路径', '并行', '等首 token'])
     expect(String(laneOf(drawn, '#2')!.props!.source)).toContain(FILL.running)
-    expect(new Set(svgs.map(svg => svg.props!.width)).size).toBe(1)
+    expect(new Set(svgs.slice(3).map(svg => svg.props!.width)).size).toBe(1)
+    // The critical path in FILL.running: every request, and Bash, the longest tool of #1; Read ×3 runs beside Grep, parallel in TRACK.
+    expect(String(laneOf(drawn, '#0')!.props!.source)).toContain(FILL.running)
+    expect(String(laneOf(drawn, '#0')!.props!.source), 'the first-token wait hatched').toContain('url(#hatch)')
+    expect(String(laneOf(drawn, 'Bash')!.props!.source)).toContain(FILL.running)
+    expect(String(laneOf(drawn, 'Read ×3')!.props!.source)).not.toContain(FILL.running)
+    expect(String(laneOf(drawn, 'worker')!.props!.source), 'a fork still running').toContain(FILL.running)
 
-    for (const part of ['3步', '输入 366k', '缓存读', '#0 · opus-5-5', 'Read ×3', 'Bash', '41.2s', '关键', '▸ worker · 实现 X', '后台', '压缩 182k → 41k', '● 运行']) {
+    for (const part of ['总时长', '关键路径', '工具', '缓存读', '3步', '输入 366k', '#0', ' opus-5-5 12.4s', '└ Read ×3 ', 'Bash', '41.2s', '关键', '└ ▸ worker · 实现 X ', '后台', '压缩 182k → 41k', '● 运行']) {
       expect(text).toContain(part)
     }
+
+    // Each label is a Text in a Box of fixed width that does not shrink, left of its lane.
+    const labelBoxes = nodesOf(drawn, 'Box').filter(box => box.props!.width === 22 && box.props!.flexShrink === 0)
+
+    expect(labelBoxes).toHaveLength(9)
 
     const closed = drawTimelineDesktop(EL, FIXTURE, 't1', NOW, 100, RUNNING_C1)
 
@@ -507,6 +521,118 @@ describe('timeline view, desktop', () => {
 
     expect(nodesOf(drawn, 'Svg')).toHaveLength(0)
     expect(stringsOf(drawn)).toContain('从本次加载起记录；还没有模型请求')
+  })
+})
+
+const ev = (minute: number, name: string, attributes: Record<string, unknown> = {}, severity = 'INFO') =>
+  JSON.stringify({ timestamp: new Date(T0 + minute * 60_000).toISOString(), event_name: name, severity_text: severity, attributes: { 'session.id': 'me2b7f', ...attributes } })
+
+/** This session: a start, then one event of every kind and an unknown one, 11 rows; another session of 2 events. */
+const LEDGER = groupEvents(
+  [
+    ...parseLedger(
+      [
+        ev(0, 'session.start'),
+        ev(1, 'mmrun.start', { 'run.id': 'r1', label: 'review:worktree:full', models: 'codex,grok' }),
+        ev(2, 'guard.block', { 'rule.id': 'secret', target: 'grep -nE "^(export|set) " a.sh' }),
+        ev(3, 'gate.result', { command: 'claude plugin test plugins/dashboard', pass: 678, fail: 0, outcome: 'pass' }),
+        ev(4, 'agent.end', { 'agent.id': 'a1b2c3d4e5f6', 'agent.type': 'worker', state: 'done', duration_ms: 245_000 }),
+        ev(5, 'agent.denied', { 'agent.id': 'b1', 'agent.type': 'worker', tool: 'Bash' }, 'WARN'),
+        ev(6, 'agent.end', { 'agent.id': 'c1', 'agent.type': 'researcher', state: 'aborted', duration_ms: 160_000 }, 'WARN'),
+        ev(7, 'session.compact', { trigger: 'auto', tokens_before: 186_000, tokens_after: 41_000 }),
+        ev(8, 'mmrun.end', { 'run.id': 'r1', label: 'review:worktree:full', status: 'codex:DONE,grok:FAIL:1' }, 'WARN'),
+        ev(9, 'rule.hint', { 'rule.id': 'reply-language' }),
+        ev(10, 'gate.result', { command: 'bun test', pass: 22, fail: 2, outcome: 'fail' }, 'WARN'),
+        ev(11, 'custom.thing'),
+        'not json',
+      ].join('\n'),
+      'me2b7f',
+    ),
+    ...parseLedger([ev(-60, 'session.start'), ev(-59, 'gate.result', { pass: 1, fail: 0, outcome: 'pass' })].join('\n').replaceAll('me2b7f', '9c1e77'), '9c1e77'),
+  ],
+  'me2b7f',
+)
+
+describe('timeline events view', () => {
+  test('desktop: four KPI tiles, the newest 8 rows newest last behind ▸ 其余 3 条, each glyph in its kind’s theme key; the other session folded', () => {
+    setLang('zh-CN')
+
+    const toggled: string[] = []
+    // A Button that keeps its onPress, to press it.
+    const pressable = { ...(EL as object), Button: (props: Record<string, unknown>) => ({ type: 'Button', props }) } as never
+    const drawn = drawEventsDesktop(pressable, LEDGER, { onToggleDisclosure: key => toggled.push(key) })
+    const text = stringsOf(drawn).join('\n')
+    const glyphColors = nodesOf(drawn, 'Text')
+      .filter(node => node.props!.bold === true && (node.children ?? []).length === 1 && /^[✓✗⊘↩▶■◇!·]$/.test(String(node.children![0])))
+      .map(node => `${String(node.children![0])} ${String(node.props!.color)}`)
+
+    expect(nodesOf(drawn, 'Svg')).toHaveLength(0)
+
+    expect(nodesOf(drawn[0], 'Text').map(node => `${String(node.children![0])} ${String(node.props!.color)}`)).toEqual([
+      '事件 subtle',
+      '11 text',
+      '拦截 subtle',
+      '1 warning',
+      '门禁 subtle',
+      // A failed gate turns the tile red.
+      '2 error',
+      '子 agent subtle',
+      '3 permission',
+    ])
+    expect(glyphColors).toEqual(['↩ success', '✗ error', '↩ warning', '◇ subtle', '■ warning', '! warning', '✗ error', '· subtle'])
+    expect(text).toContain('本会话 me2b…')
+    expect(text).toContain(`${clockOf(T0)} 起 · 11 条`)
+    expect(text).not.toContain('守卫拦截')
+    expect(text).toContain('186k → 41k')
+    expect(text).toContain('review:worktree:full · codex:DONE,grok:FAIL:1')
+    expect(text, 'mmrun.end takes the time since its start').toContain('7m00s')
+    expect(text).toContain('4m05s')
+    expect(text).toContain('22 pass · 2 fail · bun test')
+    expect(text).toContain(`▸ 会话 9c1e… · ${clockOf(T0 - 3_600_000)} 起 · 1 条`)
+    expect(text).not.toContain('not json')
+
+    const more = nodesOf(drawn, 'Button').find(one => one.props!.label === '▸ 其余 3 条')!
+
+    ;(more.props!.onPress as () => void)()
+    expect(toggled).toEqual(['timeline-events-all'])
+
+    const all = drawEventsDesktop(EL, LEDGER, { disclosures: new Set(['timeline-events-all']) })
+
+    expect(stringsOf(all).join('\n')).toContain('守卫拦截')
+    expect(nodesOf(all, 'Button').map(one => one.props!.label)).toEqual(['收起'])
+  })
+
+  test('desktop: nothing read, or no event of this session: the tiles all zero and one dim line', () => {
+    setLang('en')
+
+    for (const read of [undefined, groupEvents([], 'me')]) {
+      const drawn = drawEventsDesktop(EL, read)
+
+      expect(stringsOf(drawn).join('\n')).toContain('No events in this session today')
+      expect(nodesOf(drawn, 'Text').filter(node => node.props!.bold === true)).toEqual([])
+    }
+  })
+
+  test('terminal: the tiles in one line, rows aligned in columns with the duration right-aligned, the older ones and the other session folded', () => {
+    setLang('en')
+
+    const lines = eventLines(LEDGER, 100)
+    const texts = lines.map(textOf)
+    const rows = lines.filter(line => /^\d\d:\d\d {2}/.test(textOf(line)))
+
+    expect(texts[0]).toBe('Events 11 · Blocks 1 · Gates 2 · Subagents 3')
+    expect(colorOf(lines[0]!, '2'), 'a failed gate').toBe('error')
+    expect(texts[1]).toBe(`This session me2b… · since ${clockOf(T0)} · 11 events`)
+    expect(texts[2]).toBe('▸ 3 more')
+    expect(rows).toHaveLength(8)
+    expect(new Set(rows.map(line => widthOf(textOf(line)))), 'every row as wide as the pane').toEqual(new Set([100]))
+    expect(new Set(rows.map(line => widthOf(textOf(line.slice(0, 3))))), 'the details start in one column').toEqual(new Set([widthOf(textOf(rows[0]!.slice(0, 3)))]))
+    expect(textOf(rows[0]!)).toMatch(/agent returned  worker · a1b2c3d4 +4m05s$/)
+    expect(rows.map(line => line[1]!.color)).toEqual(['success', 'error', 'warning', 'subtle', 'warning', 'warning', 'error', 'subtle'])
+    expect(texts.at(-1)).toBe(`▸ session 9c1e… · since ${clockOf(T0 - 3_600_000)} · 1 event`)
+    expect(lines.every(line => widthOf(textOf(line)) <= 100)).toBe(true)
+    expect(eventLines(LEDGER, 40).every(line => widthOf(textOf(line)) <= 40), 'narrow').toBe(true)
+    expect(eventLines(undefined, 60).map(textOf)).toEqual(['Events 0 · Blocks 0 · Gates 0 · Subagents 0', 'No events in this session today'])
   })
 })
 

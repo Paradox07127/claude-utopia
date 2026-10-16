@@ -47,4 +47,11 @@ mmrun review [scope] [options]
 
 Then follow mmrun's output. When the run ends, the plugin sends each model's critical/major findings and the judge rules.
 
+mmrun keeps the material small:
+- Lockfiles, JSON, test data, generated files (also `linguist-generated`, `linguist-vendored` and `-diff` in `.gitattributes`) and scratch files (`.orig`, `.bak`, `.notes/`) are left out; the models see them listed (`LEFT OUT` line).
+- Tests go in only while the part has room.
+- A change under 50 KB goes in with the whole function around each hunk, unless that no longer fits one part.
+- A change over 150 KB is split by files into up to 4 parts, one run each (`PART i/n` lines). The plugin sends one message once every part has ended; `mmrun report` covers every part. One file over 150 KB gets a part of its own.
+- A `NOTE` line names source files that no part holds: files past the 4-part limit (review them with `--paths "<files>"`), and single diffs over 400 KB (tell the user).
+
 For a written report, `mmrun report -o <file>.md`; for other subcommands (start, ask, room, thread, cancel, clean), run `mmrun` without arguments to see usage.

@@ -4,6 +4,7 @@ import type { AgentRun, AgentUsage, AskCounts, BoardNode, BoardRead, BoardReques
 import { bandText, elapsedOf, fit, fmtDuration, fmtTokens, glyphOf, widthOf } from './agent-model'
 import { t } from './i18n'
 import { elapsedSecs, fmtRunTokens, fmtSecs, isFailedModel, runLabel } from './runs'
+import { activityText, taskOfAgent, taskOfModel } from './tasks'
 import type { Flight } from './timeline'
 import { dayOf, isEmptyWeek } from './usage'
 import type { UsageWeek } from './usage'
@@ -106,7 +107,8 @@ export function agentBucket(run: AgentRun, seen: DashSeen, now: number): Bucket 
     return 'running'
   }
 
-  return isUnseen(run.endedAt, seen.agents) ? 'unread' : null
+  // Not ended: nothing to read yet.
+  return run.state !== 'idle' && isUnseen(run.endedAt, seen.agents) ? 'unread' : null
 }
 
 export function modelBucket(model: MmRun['models'][number], seen: DashSeen, now: number): Bucket | null {
@@ -894,16 +896,17 @@ export function agentTable(runs: readonly AgentRun[], now: number, columns: numb
   const heads = t().agentColumns
   const cells = runs.map(run => {
     const flight = run.state === 'running' ? flights.get(run.agentId) : undefined
+    const task = taskOfAgent(run)
 
     return {
       glyph: glyphOf(run.state),
       word: run.state === 'running' ? t().runWord : t().agentStates[run.state],
-      type: run.subagentType,
-      task: run.description,
-      model: run.model.replace(/^claude-/, ''),
+      type: task.kind,
+      task: task.title,
+      model: task.model.replace(/^claude-/, ''),
       time: fmtDuration(elapsedOf(run, now)),
       tokens: tokensText(run.usage),
-      tools: `${run.tools}`,
+      tools: `${task.tools ?? 0}`,
       denied: (run.denied ?? 0) > 0 ? `✗${run.denied}` : '',
       flight: flight === undefined ? '' : flightText(flight, now),
     }
@@ -1008,7 +1011,8 @@ function modelGlyph(model: MmModel): Seg {
 
 /**
  * The Reviews page per run: a head `design · review  aaaa  proj`, then `  ● codex  RUNNING  4m15s  25.8k tok` per model, the columns
- * lined up across every run shown; a returned model's row dim. All within `columns`: the model name is cut first, then the tokens go.
+ * lined up across every run shown, a running model's `3 tools · Bash` after them; a returned model's row dim.
+ * All within `columns`: the activity is cut first, then the model name, then the tokens go.
  */
 export function runTable(runs: readonly MmRun[], polledAt: number, columns: number): { run: MmRun; head: Line; rows: Line[] }[] {
   const models = runs.flatMap(run => run.models)
@@ -1035,15 +1039,21 @@ export function runTable(runs: readonly MmRun[], polledAt: number, columns: numb
       run,
       head: fitLine([{ text: `${run.tag || '-'} · ${run.mode}`, bold: true }, { text: `${GAP}${run.runid.slice(-4)}${GAP}${dir}`, dim: true }], columns),
       rows: run.models.map(model => {
+        // The row marks no session: null leaves isThisSession out.
+        const task = taskOfModel(run, model, null)
         const dim = model.status === 'DONE' ? { dim: true } : {}
         const text = [
-          ...(nameFit > 0 ? [padTo(fit(model.name, nameFit), nameFit)] : []),
+          ...(nameFit > 0 ? [padTo(fit(task.provider, nameFit), nameFit)] : []),
           padTo(model.status, statusW),
           alignRight(timeOf(model), timeW),
-          ...(isTok ? [alignRight(tokOf(model), tokW)] : []),
+          ...(isTok ? [alignRight(fmtRunTokens(task.outputTokens), tokW)] : []),
         ].join(GAP)
+        const activity = activityText(task)
 
-        return fitLine([{ text: GAP, ...dim }, { ...modelGlyph(model), ...dim }, { text: ` ${text}`.trimEnd(), ...dim }], columns)
+        return fitLine(
+          [{ text: GAP, ...dim }, { ...modelGlyph(model), ...dim }, { text: ` ${text}`.trimEnd(), ...dim }, ...(activity === '' ? [] : [{ text: `${GAP}${activity}`, dim: true }])],
+          columns,
+        )
       }),
     }
   })

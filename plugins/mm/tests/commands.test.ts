@@ -35,6 +35,8 @@ function seat(on: On) {
     // What fs.write last wrote, by path; kept apart from `files` so a mark does not make a run directory exist.
     marks: new Map<string, string>(),
     runs: [] as string[][],
+    // The env each process.run set, in the order of `runs`.
+    envs: [] as ({ readonly [x: string]: string } | undefined)[],
     submitted: [] as string[],
     contexts: [] as string[][],
     nexted: [] as string[],
@@ -83,6 +85,7 @@ function seat(on: On) {
     const reply = world.replies.get(argv) ?? { exitCode: 0, stdout: '' }
 
     world.runs.push([...e.argv])
+    world.envs.push(e.init?.env)
 
     return { value: { exitCode: reply.exitCode, stdout: reply.stdout, stderr: reply.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -183,6 +186,22 @@ describe('/mm:review and /mm:run', () => {
     expect(await watched(world, clock)).toEqual([RID])
   })
 
+  test('mmrun starts with this session id as CLAUDE_CODE_SESSION_ID, which it writes into the run', async ($, on) => {
+    const { world } = seat(on)
+
+    await $.command.run(command('mm:review', '--staged'))
+    expect(world.envs[0]).toEqual({ CLAUDE_CODE_SESSION_ID: SID })
+  })
+
+  test('a refused session id starts mmrun without CLAUDE_CODE_SESSION_ID', async ($, on) => {
+    const { world } = seat(on)
+
+    world.isIdDenied = true
+    await $.command.run(command('mm:review', '--staged'))
+    expect(world.runs[0]?.[1]).toBe('review')
+    expect(world.envs[0]?.CLAUDE_CODE_SESSION_ID).toBeUndefined()
+  })
+
   test('natural language goes to the markdown command, no mmrun', async ($, on) => {
     const { world } = seat(on)
     const r = await $.command.run(command('mm:review', '看看并发'))
@@ -218,6 +237,21 @@ describe('/mm:review and /mm:run', () => {
 
     await $.command.run(command('mm:review', '--staged'))
     expect(world.runs[0]).toEqual([MMRUN, 'review', '--staged', '--models', 'agy', '--dir', '/r'])
+  })
+
+  test('a review split into parts: every RUN line is watched and the note names each run', async ($, on) => {
+    const { world, clock } = seat(on)
+    const RID2 = '20261002-130000-beef'
+
+    world.replies.set(`${MMRUN} review --staged --models codex,grok --dir /r`, {
+      exitCode: 0,
+      stdout: `PART 1/2  3 files, 90000 B\nRUN ${RID}  models=codex,grok  mode=review  dir=/r\nPART 2/2  1 files, 80000 B\nRUN ${RID2}  models=codex,grok  mode=review  dir=/r\n`,
+    })
+
+    const r = await $.command.run(command('mm:review', '--staged'))
+
+    expect((r.context ?? []).join('\n')).toContain(`${RID}, ${RID2}`)
+    expect(await watched(world, clock)).toEqual([RID, RID2])
   })
 
   test('--models given by the user wins over reviewModels', async ($, on) => {
@@ -458,6 +492,94 @@ describe('watching a run', () => {
     expect(world.submitted.length).toBe(1)
   })
 
+  test('a review split into parts: one message once every part has ended, within 16000 characters', async ($, on) => {
+    const { world, clock } = seat(on)
+    const RID2 = '20261002-130000-beef'
+    const DIR2 = `/h/.claude/mmruns/${RID2}`
+
+    world.replies.set(`${MMRUN} review --staged --models codex,grok --dir /r`, {
+      exitCode: 0,
+      stdout: `PART 1/2  1 files, 9 B\nRUN ${RID}  models=codex  mode=review  dir=/r\nPART 2/2  1 files, 9 B\nRUN ${RID2}  models=codex  mode=review  dir=/r\n`,
+    })
+    await $.command.run(command('mm:review', '--staged'))
+
+    for (const [dir, rid] of [
+      [DIR, RID],
+      [DIR2, RID2],
+    ] as const) {
+      world.files.set(`${dir}/run.meta`, `runid=${rid}\ntag=review:staged:brief\nmodels=codex\ngroup=${RID},${RID2}\n`)
+      world.replies.set(`${MMRUN} result codex ${rid} --top`, { exitCode: 0, stdout: `## MAJOR\n- ${rid} ${'x'.repeat(12_000)}\n` })
+      world.replies.set(`${MMRUN} result codex ${rid} --top --oneline`, { exitCode: 0, stdout: `- ${rid}.ts:1 [major] a race\n` })
+    }
+
+    world.files.set(`${DIR}/codex.status`, 'DONE\n')
+    world.files.set(`${DIR2}/codex.status`, 'RUNNING\n')
+    await clock.advance(5_000)
+    expect(world.submitted).toEqual([])
+
+    world.files.set(`${DIR2}/codex.status`, 'DONE\n')
+    await clock.advance(5_000)
+    expect(world.submitted.length).toBe(1)
+
+    const text = world.submitted[0] ?? ''
+
+    expect(text.split('\n')[0]).toBe(`mm plugin: /mm:review was split by files into 2 parts (${RID}, ${RID2}); every part has ended, each result follows.`)
+    expect(text.indexOf(`review ${RID} has finished`)).toBeLessThan(text.indexOf(`review ${RID2} has finished`))
+    expect(text).toContain(`- ${RID}.ts:1 [major] a race`)
+    expect(text).toContain(`- ${RID2}.ts:1 [major] a race`)
+    expect(text.length).toBeLessThanOrEqual(16_000)
+    expect(await watched(world, clock)).toEqual([])
+  })
+
+  test('a split review whose first part is not watched: the watched parts go out once, as one message', async ($, on) => {
+    const { world, clock } = seat(on)
+    const RID0 = '20261002-110000-0000'
+    const RID2 = '20261002-130000-beef'
+    const DIR2 = `/h/.claude/mmruns/${RID2}`
+
+    world.replies.set(`${MMRUN} review --staged --models codex,grok --dir /r`, {
+      exitCode: 0,
+      stdout: `RUN ${RID}  models=codex  mode=review  dir=/r\nRUN ${RID2}  models=codex  mode=review  dir=/r\n`,
+    })
+    await $.command.run(command('mm:review', '--staged'))
+
+    for (const [dir, rid] of [
+      [DIR, RID],
+      [DIR2, RID2],
+    ] as const) {
+      world.files.set(`${dir}/run.meta`, `runid=${rid}\ntag=review:staged:brief\nmodels=codex\ngroup=${RID0},${RID},${RID2}\n`)
+      world.files.set(`${dir}/codex.status`, 'DONE\n')
+    }
+
+    await clock.advance(5_000)
+    expect(world.submitted.length).toBe(1)
+    expect(world.submitted[0]).toContain(`review ${RID} has finished`)
+    expect(world.submitted[0]).toContain(`review ${RID2} has finished`)
+    expect(world.submitted[0]?.split('\n')[0]).toBe(
+      `mm plugin: /mm:review was split by files into 3 parts (${RID0}, ${RID}, ${RID2}); the results of ${RID}, ${RID2} follow. Not watched by this session: ${RID0} (\`mmrun result <model> ${RID0}\` reads it).`,
+    )
+  })
+
+  test('a part whose run.meta names no group still goes out once, inside its group message', async ($, on) => {
+    const { world, clock } = seat(on)
+    const RID2 = '20261002-130000-beef'
+    const DIR2 = `/h/.claude/mmruns/${RID2}`
+
+    world.replies.set(`${MMRUN} review --staged --models codex,grok --dir /r`, {
+      exitCode: 0,
+      stdout: `RUN ${RID}  models=codex  mode=review  dir=/r\nRUN ${RID2}  models=codex  mode=review  dir=/r\n`,
+    })
+    await $.command.run(command('mm:review', '--staged'))
+    world.files.set(`${DIR}/run.meta`, `runid=${RID}\ntag=review:staged:brief\nmodels=codex\ngroup=${RID},${RID2}\n`)
+    world.files.set(`${DIR2}/run.meta`, `runid=${RID2}\ntag=review:staged:brief\nmodels=codex\n`)
+    world.files.set(`${DIR}/codex.status`, 'DONE\n')
+    world.files.set(`${DIR2}/codex.status`, 'DONE\n')
+    await clock.advance(5_000)
+    await clock.advance(5_000)
+    expect(world.submitted.length).toBe(1)
+    expect(world.submitted[0]?.split(`review ${RID2} has finished`).length).toBe(2)
+  })
+
   test('a model that failed with a reason: its section gives the reason', async ($, on) => {
     const { world, clock } = seat(on)
 
@@ -556,6 +678,8 @@ describe('watching a run', () => {
     expect(text).toContain(`yyy\n\n## grok(DONE)`)
     expect(text).toContain(`\n[cut; full: mmrun result grok ${RID}]\nyyy`)
     expect(text.endsWith('yyy')).toBe(true)
+    // An unsplit run keeps the whole 16000: the share reserved for a split review's header is not taken.
+    expect(text.length).toBeGreaterThan(15_900)
   })
 
   test('a run message over 16000 characters is cut without --oneline; a read rebuilds it from the cut outputs', async ($, on) => {
@@ -873,6 +997,8 @@ describe('a result the model already read', () => {
     const seated = seat(on)
 
     await $.classic.PostToolUse(bashRan('mmrun start --models codex,grok --dir /r <<< "q"', `RUN ${RID2}  models=codex,grok  mode=start  dir=/r\n`) as never)
+    seated.world.files.set(`${RUN_DIR}/run.meta`, `runid=${RID2}\nmode=start\nsession=s1\n`)
+    seated.world.files.set('/h/.claude/mmruns/.latest-s1', `${RID2}\n`)
     seated.world.files.set(`${RUN_DIR}/codex.status`, 'RUNNING\n')
     seated.world.files.set(`${RUN_DIR}/grok.status`, 'RUNNING\n')
     seated.world.replies.set(`${MMRUN} result codex ${RID2} --top`, { exitCode: 0, stdout: 'answer of codex\n' })
@@ -957,6 +1083,8 @@ describe('a result the model already read', () => {
     const RID3 = '20261002-140000-cafe'
 
     await $.classic.PostToolUse(bashRan('mmrun start --models codex --dir /r <<< "q2"', `RUN ${RID3}  models=codex  mode=start  dir=/r\n`) as never)
+    world.files.set(`/h/.claude/mmruns/${RID3}/run.meta`, `runid=${RID3}\nmode=start\nsession=s1\n`)
+    world.files.set('/h/.claude/mmruns/.latest-s1', `${RID3}\n`)
     world.files.set(`/h/.claude/mmruns/${RID3}/codex.status`, 'DONE\n')
     world.replies.set(`${MMRUN} result codex ${RID3} --top`, { exitCode: 0, stdout: 'answer of codex 3\n' })
     world.files.set(`${RUN_DIR}/codex.status`, 'DONE\n')
@@ -970,6 +1098,25 @@ describe('a result the model already read', () => {
 
     expect(context).toContain(`run ${RID3} has finished\n\n## codex(DONE)\nYou already read this result.`)
     expect(context).toContain(`run ${RID2} has finished\n\n## codex(DONE)\nanswer of codex`)
+  })
+
+  test('a read naming no run, after the latest run was delivered, marks nothing in an older run', async ($, on) => {
+    const { world, clock } = await started($, on)
+    const RID3 = '20261002-140000-cafe'
+
+    world.files.set(`${RUN_DIR}/codex.status`, 'DONE\n')
+    await $.classic.PostToolUse(bashRan('mmrun start --models codex --dir /r <<< "q2"', `RUN ${RID3}  models=codex  mode=start  dir=/r\n`) as never)
+    world.files.set(`/h/.claude/mmruns/${RID3}/run.meta`, `runid=${RID3}\nmode=start\nsession=s1\n`)
+    world.files.set('/h/.claude/mmruns/.latest-s1', `${RID3}\n`)
+    world.files.set(`/h/.claude/mmruns/${RID3}/codex.status`, 'DONE\n')
+    world.replies.set(`${MMRUN} result codex ${RID3} --top`, { exitCode: 0, stdout: 'answer of codex 3\n' })
+    await clock.advance(5_000)
+    expect(world.submitted[0]).toContain(`run ${RID3} has finished`)
+
+    await $.classic.PostToolUse(bashRan('mmrun result codex', 'answer of codex 3\n') as never)
+    world.files.set(`${RUN_DIR}/grok.status`, 'DONE\n')
+    await clock.advance(5_000)
+    expect(world.submitted[1]).toContain(`run ${RID2} has finished\n\n## codex(DONE)\nanswer of codex`)
   })
 
   test('a read by a subagent changes nothing', async ($, on) => {

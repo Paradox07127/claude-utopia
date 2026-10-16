@@ -195,7 +195,7 @@ describe('workspace cards', () => {
     for (const surface of SURFACES) {
       const text = textOf(await $.ui.render(pane(surface)))
 
-      expect(text).toContain(surface === 'terminal' ? '工作树 · 2' : '工作树  2')
+      expect(text).toContain('工作树 · 2')
       expect(text).toContain('agent-a')
       expect(text).toContain('worktree-agent-a')
       expect(text).toContain('改动 3')
@@ -383,7 +383,7 @@ describe('recent blocks', () => {
     for (const surface of SURFACES) {
       const ui = await $.ui.mount({ plugin: 'dashboard', ...pane(surface) } as never)
       let lines = linesOf(await ui.drawn())
-      const head = surface === 'terminal' ? '最近拦截' : '最近拦截  5'
+      const head = surface === 'terminal' ? '最近拦截' : '最近拦截 · 5'
       const at = lines.indexOf(head)
 
       expect(at, surface).toBeGreaterThan(-1)

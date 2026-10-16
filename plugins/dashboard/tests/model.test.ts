@@ -1,3 +1,4 @@
+import type { AgentStatus } from 'claude-code'
 import { describe, expect, test } from 'claude-code/testing'
 
 import type { AgentRun, GateRun, GpuWatch, MmRun, MmSnapshot } from '../types'
@@ -74,18 +75,44 @@ describe('agent model', () => {
     expect([elapsedOf(byTool, 90_000), elapsedOf(byTool, 100_000)], 'resumed by a tool ending: the same rule').toEqual([65_000, 75_000])
   })
 
-  test('the engine list closes a running agent it reports ended; one it lists running or not at all stays', () => {
-    const list = ['k', 'f', 'c', 'r', 'gone'].map(agentId => ({ ...RUN, agentId, startedAt: 1_000 }))
-    const info = (id: string, status: string) => ({ id, status, description: '', type: 'worker' })
-    const after = noteListed(list, [info('k', 'killed'), info('f', 'failed'), info('c', 'completed'), info('r', 'running')], 200_000)
+  test('the engine list closes a running agent it reports ended, or that an earlier list showed and it shows no more; one it never listed stays running', () => {
+    const list = ['k', 'f', 'c', 'r', 'gone', 'never'].map(agentId => ({ ...RUN, agentId, startedAt: 1_000 }))
+    const info = (id: string, status: AgentStatus) => ({ id, status, description: '', type: 'worker' })
+    const after = noteListed(list, [info('k', 'killed'), info('f', 'failed'), info('c', 'completed'), info('r', 'running'), info('gone', 'running')], 200_000)
 
-    expect(after.map(one => one.state)).toEqual(['aborted', 'error', 'done', 'running', 'running'])
+    expect(after.map(one => one.state)).toEqual(['aborted', 'error', 'done', 'running', 'running', 'running'])
     expect(after[0]).toMatchObject({ endedAt: 200_000, durationMs: 199_000 })
     expect(after[3]?.endedAt).toBeUndefined()
 
+    const later = noteListed(after, [info('r', 'running')], 300_000)
+
+    expect(later.map(one => one.state), 'gone from the list: closed; never in it (a workflow agent): running').toEqual(['aborted', 'error', 'done', 'running', 'aborted', 'running'])
+    expect(later[4]).toMatchObject({ endedAt: 300_000, durationMs: 299_000 })
+    expect(later[0], 'an ended one is left alone').toMatchObject({ endedAt: 200_000, durationMs: 199_000 })
+    expect(later[5]?.endedAt).toBeUndefined()
+
     const done: AgentRun = { ...RUN, state: 'done', endedAt: 5, durationMs: 5 }
 
-    expect(noteListed([done], [info('a1', 'killed')], 9)[0], 'an ended one is left alone').toEqual(done)
+    expect(noteListed([done], [info('a1', 'killed')], 9)[0], 'an ended one is left alone').toMatchObject({ state: 'done', endedAt: 5, durationMs: 5 })
+    expect(noteListed(noteListed([done], [info('a1', 'completed')], 9), [], 10)[0], 'nor closed again once dropped').toMatchObject({ state: 'done', endedAt: 5, durationMs: 5 })
+  })
+
+  test('an agent the engine lists idle is idle: not running, not ended, its clock stopped, not counted nor quiet; a tool resumes it', () => {
+    const info = { id: 'a1', status: 'idle' as AgentStatus, description: '', type: 'worker' }
+    const idle = noteListed([{ ...RUN, startedAt: 1_000 }], [info], 200_000)[0]!
+
+    expect(idle).toMatchObject({ state: 'idle', durationMs: 199_000 })
+    expect(idle.endedAt).toBeUndefined()
+    expect(elapsedOf(idle, 900_000)).toBe(199_000)
+    expect(boardOf([idle], null, NONE_SEEN, 900_000).counts).toEqual({ pending: 0, running: 0, unread: 0 })
+    expect(agentLine(idle, 900_000).some(seg => seg.color === 'warning'), 'no quiet mark').toBe(false)
+
+    const resumed = noteTool([idle], 'a1', 'Read x', 300_000)[0]!
+
+    expect(resumed).toMatchObject({ state: 'running', activeMs: 199_000, turnAt: 300_000 })
+    expect(noteListed([idle], [info], 400_000)[0], 'listed idle again: as it was').toEqual(idle)
+    expect(noteListed([idle], [{ ...info, status: 'killed' }], 400_000)[0], 'killed while idle: ended, its clock as it stopped').toMatchObject({ state: 'aborted', endedAt: 400_000, durationMs: 199_000 })
+    expect(noteListed([idle], [], 400_000)[0], 'listed before, dropped now').toMatchObject({ state: 'aborted', endedAt: 400_000, durationMs: 199_000 })
   })
 
   test('keeps at most 30 runs, dropping the oldest', () => {

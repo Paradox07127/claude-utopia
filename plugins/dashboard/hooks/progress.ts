@@ -512,6 +512,60 @@ export function planRequest(
   }
 }
 
+const PLAN_STATUSES: ReadonlyMap<unknown, BoardStatus> = new Map<unknown, BoardStatus>([
+  ['pending', 'todo'],
+  ['in_progress', 'doing'],
+  ['completed', 'done'],
+])
+
+const stepText = (text: string) => text.trim().replace(/\s+/g, ' ').toLowerCase()
+
+/**
+ * The desktop app's task list (update_plan's `items`) against `request`'s pieces: an update per matched piece whose status the
+ * item changes, an add per item no piece names. A done piece is never moved, nor a blocked one back to todo.
+ */
+export function planSyncEvents(
+  items: readonly unknown[],
+  nodes: readonly BoardNode[],
+  request: string,
+  takenIds: ReadonlySet<string>,
+  at: number,
+  session: string,
+  commit: string | null,
+): NodeEvent[] {
+  const free = nodes.filter(one => one.request === request && one.status !== 'dropped')
+  const taken = new Set(takenIds)
+
+  return items.flatMap((item): NodeEvent[] => {
+    const { content, status: given } = typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : {}
+    const status = PLAN_STATUSES.get(given)
+
+    if (typeof content !== 'string' || content.trim() === '' || status === undefined) {
+      return []
+    }
+
+    // Pieces are stored under the cut title, so a longer item is matched by its cut too.
+    const title = content.trim().slice(0, TITLE_CHARS)
+    const index = free.findIndex(one => stepText(one.title) === stepText(title))
+
+    if (index === -1) {
+      const node = newNodeId(at, taken)
+
+      taken.add(node)
+
+      return [{ type: 'add', node, at, session, commit, fields: { title, status, kind: 'feature', done_when: title, request } }]
+    }
+
+    const [node] = free.splice(index, 1)
+
+    if (node!.status === status || node!.status === 'done' || (node!.status === 'blocked' && status === 'todo')) {
+      return []
+    }
+
+    return [{ type: 'update', node: node!.id, at, session, commit, fields: { status } }]
+  })
+}
+
 /**
  * The request a recording's reply names when the session has none: an open request's id, or `{title, acceptance}` making a new
  * one, its event in `events`; anything else refused.

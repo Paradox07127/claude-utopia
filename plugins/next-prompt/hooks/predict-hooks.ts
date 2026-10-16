@@ -42,6 +42,8 @@ type PredictionOutcome = {
 
 // The suggestion in the prompt box now; any submitted prompt ends it, and a reload drops it unlogged.
 let shownPrediction: { text: string; forkMs: number; inputTokens: number; cachedTokens: number } | null = null
+// The desktop app's last next-step box: whether it asked a question, and the prompts its reply buttons send.
+let box: { asked: boolean; replies: string[] } | null = null
 
 // Lives here, not in i18n.ts: validate only follows $ into functions declared in the same file.
 async function resolveLang($: EngineInterface, option: unknown): Promise<Lang> {
@@ -121,12 +123,35 @@ export const register: Register = (on, options) => {
   // The fork answers only after the turn has ended, so it runs on a timer: a dispatch's own work stops with it.
   on('turn.complete', { turnId: /^/ }, async ($, e, next) => {
     const done = await next(e)
-    if (e.agentId === undefined && e.reason === 'answer') {
+    if (e.agentId === undefined && e.reason === 'answer' && box?.asked !== true) {
       $.clock.after(0, () => void suggestNext($).catch(error => $.ui.log(`next-prompt: prediction failed: ${String(error)}`, { to: 'debug' })))
     }
+    if (e.agentId === undefined && box !== null) box = { ...box, asked: false }
     return done
   }).catch(($, e, next) => {
     logFailure($, 'turn.complete', next.error)
+    return next(e)
+  })
+
+  // A box that asks a question already offers the next step, so a prediction would repeat its buttons.
+  on('classic.PostToolUse', { tool_name: /^mcp__ccd_turn__wrap_up$/ }, async ($, e, next) => {
+    const input = e.tool_input
+    if (e.agent_id === undefined && typeof input === 'object' && input !== null) {
+      const { ask, actions = [] } = input as { ask?: unknown; actions?: unknown }
+      if (Array.isArray(actions)) {
+        // A button with `action` runs an app action instead of sending a prompt.
+        const replies = actions.flatMap((a: unknown) => {
+          if (typeof a !== 'object' || a === null || 'action' in a) return []
+          const { message, label } = a as { message?: unknown; label?: unknown }
+          const text = message ?? label
+          return typeof text === 'string' && text.trim() !== '' ? [text.trim()] : []
+        })
+        box = { asked: typeof ask === 'string' && ask !== '' && actions.length > 0, replies }
+      }
+    }
+    return next(e)
+  }).catch(($, e, next) => {
+    logFailure($, 'classic.PostToolUse', next.error)
     return next(e)
   })
 
@@ -137,8 +162,12 @@ export const register: Register = (on, options) => {
     const entered = await next(e)
     const shown = shownPrediction
     shownPrediction = null
+    const replies = box?.replies ?? []
+    box = null
+    // A box's button text is Claude's, not the person's typing.
+    const isReply = replies.includes(e.text.trim())
     // A -p run is an SDK host too, so only a session something draws on holds typed prompts.
-    if (!('drop' in entered) && TYPED_ORIGINS.has(e.origin.kind) && (await $.session.surfaces()).length > 0) {
+    if (!('drop' in entered) && !isReply && TYPED_ORIGINS.has(e.origin.kind) && (await $.session.surfaces()).length > 0) {
       if (shown !== null) {
         const { text, ...measured } = shown
         const distance = editDistance(text, e.text.slice(0, text.length))

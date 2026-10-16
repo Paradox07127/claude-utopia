@@ -8,6 +8,7 @@ import type {
   BoardRead,
   BoardRequest,
   DashCache,
+  DashConversation,
   DashDetail,
   DashPage,
   DashReport,
@@ -30,7 +31,7 @@ import type {
   UsageRead,
   WorktreeInfo,
 } from '../types'
-import { fit, fmtDuration, fmtTokens, noteDenied, noteDone, noteListed, noteResumed, noteSpawn, noteTool, peekOf, toolLabel, widthOf } from './agent-model'
+import { elapsedOf, fit, fmtAge, fmtDuration, fmtTokens, MAX_AGENTS, noteDenied, noteDone, noteListed, noteResumed, noteSpawn, noteTool, peekOf, toolLabel, widthOf } from './agent-model'
 import { registerAskRecommended } from './ask-recommended'
 import {
   agentFold,
@@ -41,7 +42,9 @@ import {
   CACHE_GROUP,
   endedText,
   fitLine,
+  flightText,
   foldText,
+  FRESH_MS,
   GATE_COMMAND_COLUMNS,
   gateCounts,
   HOTKEY_COLUMNS,
@@ -69,27 +72,40 @@ import {
   usageLines,
   usageText,
 } from './board'
-import type { ButtonRow, ColdCache, Line, OverviewItem, Seg } from './board'
+import type { Board, ButtonRow, ColdCache, Line, OverviewItem, Seg } from './board'
 import { drawDesktopBand, drawDesktopPane, drawDesktopPaneError, posixQuote } from './desktop'
-import type { PaneData } from './desktop'
-import { FILL, horizontalGauge } from './desktop-svg'
+import type { GpuFill } from './desktop/gpu'
+import type { TimelinePaneData } from './desktop/timeline'
+import type { BandRow } from './desktop/band'
+import { gauge } from './desktop/kit'
+import type { El } from './desktop/kit'
+import { scaleOf, TONE_KEYS } from './desktop-svg'
+import type { Tone } from './desktop-svg'
 import { attentionChime } from './chime'
+import { CI_GROUP, CI_POLL_MS, CI_RETRY_MS, ciEvents, ciLine, isNoAuth, isNoPr, isNotFound, nextCi, parseChecks, parsePr, PR_CHECKS, PR_VIEW } from './ci'
+import type { CiStatus } from './ci'
+import { conversationOf } from './conversation'
+import { capped, eventLine, eventsDir as eventLedgerDir, groupEvents, parseLedger, serially, sessionOfFile } from './events'
+import type { EventsRead, LedgerEvent, LedgerRecord } from './events'
 import { failureLine, isFirstTime } from './failures'
 import { bar, hostsOf, isHostName, sshArgv, sshHostOf, takeSamples } from './gpu-probe'
 import { pickLang, setLang, t } from './i18n'
 import type { Lang } from './i18n'
+import { isExpired, mainMoved, newestNotice, NOTICE_TTL_MS, noticeOf, NOTICES_MS, noticesDir, noticeText, parseNotice, shaOf } from './notices'
+import type { Notice } from './notices'
 import { boardDir, canvasBatches, canvasPath, canvasProject, canvasWrites, closeEvents, eventsDir, foldBoard, foldLines, foldRequests, NO_CHECKS, parseBoardEvents, parseStorage } from './progress'
 import type { BoardStorage } from './progress'
 import { onRecording } from './progress-hooks'
 import { endToast, parseKv, reportOf, reviewOf, runLabel, RUNID } from './runs'
 import { SHAPE } from './shapes'
 import { summarizeTests } from './summarize-tests'
+import { applyEvents, runSession } from './tasks'
 import { toolsInFlight } from './timeline'
 import type { Flight } from './timeline'
 import { registerTimeline } from './timeline-hooks'
-import { hotspotLines, latestMainTurnId, timelineLines } from './timeline-view'
+import { eventLines, EVENTS_VIEW, hotspotLines, latestMainTurnId, timelineLines } from './timeline-view'
 import { bashText, registerTranscript } from './transcript'
-import { daySum, daysOf, emptyDay, lastDays, ledgerDir, parseUsageDay, projectKey, weekOf } from './usage'
+import { dayOf, daySum, daysOf, emptyDay, lastDays, ledgerDir, parseUsageDay, projectKey, weekOf } from './usage'
 import type { UsageWeek } from './usage'
 import { GUARD_COLORS, guardText, parseGuards, parseWorktrees, treeMarks, treeOf } from './workspace'
 import type { Mark, PorcelainTree } from './workspace'
@@ -109,7 +125,7 @@ const pages = () =>
 const ON_DEMAND: readonly DashPage[] = ['mmrun', 'gpu', 'progress']
 // The progress page reads the board again this often while it is the current page: recordings land there from any session.
 const PROGRESS_READ_MS = 5_000
-// Each only opens a page, so each runs mid-turn instead of waiting for the turn to end.
+// Each only opens a page or posts a notice, so each runs mid-turn instead of waiting for the turn to end.
 const COMMANDS = [
   { name: 'dashboard', description: 'Open the workbench on its last page: subagents, reviews, GPU', immediate: true },
   // Not `agents`: the engine refuses a built-in's name, and /agents is one.
@@ -118,6 +134,7 @@ const COMMANDS = [
   { name: 'gpu', description: "Open the workbench's GPU page to watch an ssh host's GPUs", argumentHint: '<host>', immediate: true },
   { name: 'timeline', description: "Open the workbench's Timeline page: the main loop's turns as a waterfall of requests and tools", immediate: true },
   { name: 'progress', description: "Open the workbench's Progress page: this project's progress board", immediate: true },
+  { name: 'notice', description: 'Post a notice to every session of this repository; /notice clear hides the current ones in this session', argumentHint: '<text> | clear', immediate: true },
 ] as const
 const OPEN_PROGRESS = {
   name: 'open_progress',
@@ -142,6 +159,17 @@ const PANE_RUNS = 10
 const buttonColumns = () => widthOf(t().workbench) + 5
 const copyColumns = () => widthOf(t().copyResume) + 5
 const cdColumns = () => widthOf(t().copyCd) + 5
+// Band running rows: the title at most this wide and not cut below the least, the step label at most this wide, the text bar this many cells.
+const BAND_TITLE_COLUMNS = 24
+const BAND_MIN_TITLE_COLUMNS = 8
+const BAND_STEP_COLUMNS = 16
+const BAND_BAR_CELLS = 10
+// A session asking a permission as a card on the terminal: its frame, head, two kv rows and buttons.
+const ASK_CARD_ROWS = 6
+// Below this many columns SessionMode draws each window's ring and percent without its label.
+const MODE_LABEL_COLUMNS = 90
+const MODE_RING_PX = 18
+const WINDOW_NAMES: Record<string, string> = { five_hour: '5h', seven_day: '7d' }
 // Below this many columns a GPU row draws its utilization without the bar.
 const GPU_BAR_COLUMNS = 64
 const MAX_GATES = 30
@@ -154,6 +182,8 @@ const GIT_TIMEOUT_MS = 10_000
 const GUARD_ROWS = 5
 const GUARD_TAIL_BYTES = 65_536
 const GIT_CHANGE = /\bgit (merge|worktree|commit|checkout|switch|rebase)\b/
+// A Bash call of this session that may move main: the new sha is its own, no notice.
+const MAIN_CHANGE = /\bgit\b[^|;&]*\b(merge|commit|rebase|pull|cherry-pick|reset)\b/
 // A Bash call that writes files is not seen: only these tools' successes make a tree's gates stale.
 const EDIT_TOOLS = ['Edit', 'Write', 'MultiEdit', 'NotebookEdit']
 const PEERS_MS = 5000
@@ -174,6 +204,8 @@ const INPUT_RECENT_MS = 2 * MINUTE_MS
 const CACHE_TTL_MS = { '5m': 5 * MINUTE_MS, '1h': 60 * MINUTE_MS } as const
 // The last main-thread reply sits within this tail; $.fs.read refuses files over 4 MiB and transcripts grow past that.
 const TRANSCRIPT_TAIL_BYTES = 256 * 1024
+// The newest task_progress lines: each stays under 1 KB, its tool name cut to 80 characters and its summary to 200.
+const EVENTS_TAIL_BYTES = 4096
 const MARK_STYLES: Record<Mark['tone'], Omit<Seg, 'text'>> = {
   stale: { color: 'warning' },
   done: { color: 'success' },
@@ -191,6 +223,7 @@ const seen = atom({ plugin: 'dashboard', key: 'seen' } as const, { agents: 0, ru
 const noAutoOpen = atom({ plugin: 'dashboard', key: 'noAutoOpen' } as const, false)
 const detail = atom({ plugin: 'dashboard', key: 'detail' } as const, null as DashDetail | null, { shape: SHAPE })
 const reports = atom({ plugin: 'dashboard', key: 'reports' } as const, {} as Record<string, DashReport>, { shape: SHAPE })
+const conversation = atom({ plugin: 'dashboard', key: 'conversation' } as const, null as DashConversation | null, { shape: SHAPE })
 const gates = atom({ plugin: 'dashboard', key: 'gates' } as const, [] as GateRun[], { shape: SHAPE })
 const trees = atom({ plugin: 'dashboard', key: 'trees' } as const, null as WorktreeInfo[] | null, { shape: SHAPE })
 const guards = atom({ plugin: 'dashboard', key: 'guards' } as const, null as GuardLog | null, { shape: SHAPE })
@@ -207,14 +240,16 @@ const tick = atom({ plugin: 'dashboard', key: 'tick' } as const, 0)
 const paneWake = atom({ plugin: 'dashboard', key: 'paneWake' } as const, 0)
 const peek = atom({ plugin: 'dashboard', key: 'peek' } as const, null as AgentPeek | null, { shape: SHAPE })
 const agentsFoldOpen = atom({ plugin: 'dashboard', key: 'agentsFoldOpen' } as const, false)
+const runsFoldOpen = atom({ plugin: 'dashboard', key: 'runsFoldOpen' } as const, false)
 const agentsSeenBefore = atom({ plugin: 'dashboard', key: 'agentsSeenBefore' } as const, 0)
 const ledger = atom({ plugin: 'dashboard', key: 'ledger' } as const, null as UsageLedger | null, { shape: SHAPE })
 const usageRead = atom({ plugin: 'dashboard', key: 'usageRead' } as const, null as UsageRead | null, { shape: SHAPE })
 const progress = atom({ plugin: 'dashboard', key: 'progress' } as const, null as BoardRead | null, { shape: SHAPE })
-const SHAPED_KEYS = new Set([agents, gpu, runs, seen, detail, reports, gates, trees, guards, peers, toasted, ownPresence, cache, measured, timeline, timelinePage, peek, ledger, usageRead, progress].map(one => one.ref.key))
+const SHAPED_KEYS = new Set([agents, gpu, runs, seen, detail, reports, conversation, gates, trees, guards, peers, toasted, ownPresence, cache, measured, timeline, timelinePage, peek, ledger, usageRead, progress].map(one => one.ref.key))
 
 // Module timers die with the module on reload; session.start, or the first band drawing of a reload that raised none, restarts them.
 let ticker: Timer | null = null
+let progressReadAt = 0
 // The loops of an interactive session are running; started once per module.
 let isStarted = false
 // session.start's isInteractive: a -p or SDK session writes no presence file.
@@ -241,6 +276,10 @@ let turnEnd: 'idle' | 'failed' | undefined
 let replyLine: string | undefined
 // Other sessions' files as last read, by file name: a file whose mtime did not move is not read again.
 let peerFiles = new Map<string, { mtimeMs: number; peer: SessionPresence | null }>()
+// The results the person marked read on the band (resultKey), the last MAX_AGENTS.
+let bandDismissed: string[] = []
+// A clock Client failed: the workbench draws its times as static text from then on.
+let isClockFailed = false
 // The last band drawing's viewport.isFullscreen: whether a pane opened unasked docks beside the transcript.
 let docksPanes: boolean | undefined
 let sessionTitle: string | undefined
@@ -269,6 +308,21 @@ let hasGpuHosts = false
 let shownTabs: ReadonlySet<DashPage> | null = null
 // The progress page's re-read of the board; null while another page is current or the pane is closed.
 let progressRead: Timer | null = null
+// The branch PR's checks as last polled; null without a PR that has checks.
+let ciStatus: CiStatus | null = null
+// `gh` missing or not logged in: no `gh` is run before this time.
+let ghBlockedUntil = 0
+// The lines of this session's CI file last written; null until the first write of this load.
+let ciKept: { path: string; lines: string[] } | null = null
+const ciChain = serially()
+// The events view's last read of each ledger file of the day: one whose size and mtime did not change is not read again.
+let ledgerFiles = new Map<string, { size: number; mtimeMs: number; records: LedgerRecord[] }>()
+// The repository's notice files, this session's main-advanced notice, main's sha last read and the root it was read in, and when /notice clear ran.
+let noticeBoard: { list: Notice[]; auto: Notice | null; mainSha: string | null; mainRoot: string | null; clearedAt: number } = { list: [], auto: null, mainSha: null, mainRoot: null, clearedAt: 0 }
+// The notice files as last read, by file name: a name read as a notice is not read again.
+let noticeFiles = new Map<string, Notice | null>()
+// Runs whose report the Reviews list is reading for its legend.
+const listLoads = new Set<string>()
 
 // Ephemeral desktop command disclosure states: which command boxes are open.
 export const openDisclosures = new Set<string>()
@@ -505,13 +559,14 @@ async function flightsNow($: EngineInterface): Promise<Map<string, Flight>> {
   return read($, timeline).then(toolsInFlight, () => new Map<string, Flight>())
 }
 
+/** The board of the band; a result the person marked read on it counts neither on the band nor as unread. */
 async function boardNow($: EngineInterface) {
   const now = await $.clock.now()
-
-  return boardOf(
-    await read($, agents),
+  const marked = await read($, seen)
+  const board = boardOf(
+    (await read($, agents)).filter(one => one.state === 'running' || !bandDismissed.includes(resultKey(one))),
     await read($, runs),
-    await read($, seen),
+    marked,
     now,
     await read($, gates),
     (await read($, peers)) ?? [],
@@ -519,6 +574,32 @@ async function boardNow($: EngineInterface) {
     await flightsNow($),
     await read($, trees),
   )
+  return ciStatus === null ? board : withCi(board, ciStatus, marked.ci ?? 0)
+}
+
+/** The board with the CI row: a failure at P1, running checks at P3, a pass at P2 for FRESH_MS and unread until the workbench is opened after it. */
+function withCi(board: Board, status: CiStatus, seenAt: number): Board {
+  const tier = status.outcome === 'fail' ? 1 : status.outcome === 'pending' ? 3 : board.now - status.changedAt < FRESH_MS ? 2 : null
+  const counts = { ...board.counts }
+
+  if (status.outcome === 'fail') {
+    counts.pending += 1
+  } else if (status.outcome === 'pending') {
+    counts.running += 1
+  } else if (status.changedAt > seenAt) {
+    counts.unread += 1
+  }
+
+  if (tier === null) {
+    return { ...board, counts }
+  }
+
+  const line = ciLine(status, board.now)
+  const entry: BandEntry = { tier, startedAt: status.changedAt, group: CI_GROUP, full: line, compact: line, counts: { 1: tier === 1 ? 1 : 0, 2: tier === 2 ? 1 : 0, 3: tier === 3 ? 1 : 0, aborted: 0, failed: 0 } }
+  // The cold cache stays last, as boardOf puts it.
+  const work = [...board.entries.filter(one => one.group !== CACHE_GROUP), entry].sort((a, b) => a.tier - b.tier || a.startedAt - b.startedAt)
+
+  return { ...board, counts, entries: [...work, ...board.entries.filter(one => one.group === CACHE_GROUP)] }
 }
 
 /** The main-loop turn the timeline page shows: the one picked while it is still kept, else the latest. */
@@ -533,6 +614,256 @@ async function idleNow($: EngineInterface): Promise<Line> {
   const recent = overviewOf(await read($, agents), await read($, runs), await read($, seen), now, (await read($, peers)) ?? [], all).recent[0]
 
   return idleLine(recent, all.at(-1), now)
+}
+
+type BandEntry = Board['entries'][number]
+type RunningRow = Extract<BandRow, { kind: 'running' }>
+type AskRow = Extract<BandRow, { kind: 'ask' }>
+type NoticeRow = Extract<BandRow, { kind: 'notice' }>
+type PlanRow = Extract<BandRow, { kind: 'plan' }>
+
+/** The entries bandLines draws one per line, in its order: all of them when they fit whole, else the failures it keeps apart. */
+function entriesShown(board: Board, rows: number): BandEntry[] {
+  const { entries } = board
+
+  if (entries.length <= Math.min(rows, 3)) {
+    return entries
+  }
+
+  return rows <= 1 ? [] : entries.filter(entry => entry.tier === 1).slice(0, rows - 1)
+}
+
+/** The tone of a line's first colored segment; `idle` when none is colored. */
+function toneOfLine(line: Line): Tone {
+  const color = line.find(seg => seg.color !== undefined)?.color
+
+  return (Object.keys(TONE_KEYS) as Tone[]).find(tone => TONE_KEYS[tone] === color) ?? 'idle'
+}
+
+/**
+ * The band's rows from bandLines' `lines`: a running agent with its elapsed time on the shared scale, a fresh agent result the person may mark read,
+ * the first session asking a permission as a card while `maxRows` has room for it; any other line as given.
+ */
+function bandRowsOf(board: Board, lines: readonly Line[], rows: number, sessions: readonly SessionPresence[], maxRows: number): BandRow[] {
+  const shown = entriesShown(board, rows)
+  const running = shown.flatMap(entry => (entry.tier === 3 && entry.run?.state === 'running' ? [entry.run] : []))
+  const scale = scaleOf(Math.max(0, ...running.map(run => elapsedOf(run, board.now) / 1000)))
+  const asking = sessions.filter(one => one.state === 'permission')
+  let hasCardRoom = maxRows - lines.length >= ASK_CARD_ROWS - 1
+
+  return lines.map((line, index): BandRow => {
+    const entry = shown[index]
+    const run = entry?.run
+
+    if (entry !== undefined && run !== undefined && entry.tier === 3 && run.state === 'running') {
+      const ms = elapsedOf(run, board.now)
+      const time = fmtDuration(ms)
+      const denied: Line = (run.denied ?? 0) > 0 ? [{ text: '  ' }, { text: t().denied(run.denied ?? 0), color: 'error' }] : []
+      const quiet: Line = isStalled(run, board.now, entry.flight) ? [{ text: '  ' }, { text: t().quiet(fmtDuration(board.now - run.lastActivityAt)), color: 'warning' }] : []
+      const step = entry.flight === undefined ? run.lastTool : flightText(entry.flight, board.now)
+
+      return { kind: 'running', title: run.description, step, time, frac: ms / 1000 / scale.secs, alt: t().elapsedAlt(time, scale.label), tail: [...denied, ...quiet] }
+    }
+
+    if (entry !== undefined && run !== undefined && entry.tier === 2) {
+      return { kind: 'result', line, tone: toneOfLine(line), agentId: run.agentId }
+    }
+
+    // A failed session is a tier 1 sessions entry too: only one counted as no failure asks.
+    const at = entry?.tier === 1 && entry.group === 'sessions' && entry.counts.failed === 0 ? asking.findIndex(one => one.since === entry.startedAt) : -1
+    const peer = at < 0 ? undefined : asking.splice(at, 1)[0]
+
+    if (peer !== undefined && hasCardRoom) {
+      hasCardRoom = false
+
+      return { kind: 'ask', id: peer.id, head: `${peer.name} ${t().peerWords.permission}`, waited: t().askWaited(fmtDuration(board.now - peer.since)), task: peer.title ?? peer.name, request: peer.detail ?? '—' }
+    }
+
+    return { kind: 'line', line, tone: toneOfLine(line) }
+  })
+}
+
+/** This session's current request while open with a piece not done: its pieces not dropped, in board order; else null. */
+function planRowOf(board: BoardRead | null): PlanRow | null {
+  const request = board?.requests.find(one => one.id === board.current && one.status === 'open')
+
+  if (board === null || request === undefined) {
+    return null
+  }
+
+  const statuses = board.nodes.filter(node => node.request === request.id && node.status !== 'dropped').map(node => node.status)
+  const done = statuses.filter(status => status === 'done').length
+
+  if (statuses.length === 0 || done === statuses.length) {
+    return null
+  }
+
+  return { kind: 'plan', title: request.title, statuses, done, total: statuses.length, alt: t().planAlt(done, statuses.length, request.title) }
+}
+
+/** The plan row on the terminal: the title bold, a text bar of its done pieces, `done/total` subtle. */
+function planText(row: PlanRow): Line {
+  const done = Math.round((row.done / row.total) * BAND_BAR_CELLS)
+
+  return [
+    { text: fit(row.title, BAND_TITLE_COLUMNS), bold: true },
+    { text: ' ' },
+    { text: '▰'.repeat(done), color: 'success' },
+    { text: '▱'.repeat(BAND_BAR_CELLS - done), color: 'inactive' },
+    { text: '  ' },
+    { text: `${row.done}/${row.total}`, color: 'subtle' },
+  ]
+}
+
+/** `rows` less trailing idle, line, result and notice rows, then the plan row, until at most `count` rows weigh at most `maxRows`, an ask card ASK_CARD_ROWS. */
+function withinBand(rows: readonly BandRow[], count: number, maxRows: number): BandRow[] {
+  const kept = [...rows]
+  const weight = () => kept.reduce((sum, row) => sum + (row.kind === 'ask' ? ASK_CARD_ROWS : 1), 0)
+
+  while (kept.length > count || weight() > maxRows) {
+    const trailing = kept.findLastIndex(row => row.kind === 'idle' || row.kind === 'line' || row.kind === 'result' || row.kind === 'notice')
+    const at = trailing >= 0 ? trailing : kept.findIndex(row => row.kind === 'plan')
+
+    if (at < 0) {
+      break
+    }
+
+    kept.splice(at, 1)
+  }
+
+  return kept
+}
+
+/** The idle line on the terminal: `✓ 空闲` in success, the rest subtle, its glyphs keeping their own colors. */
+function idleText(line: Line): Line {
+  const [word, ...rest] = line
+
+  return [{ text: '✓', color: 'success' }, { text: ' ' }, { text: word?.text ?? t().idleBand, color: 'success', bold: true }, ...rest.map(seg => ({ text: seg.text, color: seg.color ?? 'subtle' }))]
+}
+
+/** A running row on the terminal: its glyph, the title `titleColumns` wide, a text bar, the step bold, the time dim. */
+function runningText(row: RunningRow, titleColumns: number): Line {
+  const done = Math.round(Math.min(1, Math.max(0, row.frac)) * BAND_BAR_CELLS)
+
+  return [
+    { text: '●', color: 'permission' },
+    { text: ` ${padTo(fit(row.title, titleColumns), titleColumns)} ` },
+    { text: '▰'.repeat(done), color: 'permission' },
+    { text: '▱'.repeat(BAND_BAR_CELLS - done), color: 'inactive' },
+    { text: '  ' },
+    ...(row.step === '' ? [] : [{ text: fit(row.step, BAND_STEP_COLUMNS), bold: true }, { text: ' ' }]),
+    { text: row.time, dim: true },
+    ...row.tail,
+  ]
+}
+
+/** One title width for every running row: the widest title up to BAND_TITLE_COLUMNS, less what `columns` cannot hold beside the rest. */
+function runningTitleColumns(rows: readonly BandRow[], columns: number): number {
+  const running = rows.filter((row): row is RunningRow => row.kind === 'running')
+  const rest = Math.max(0, ...running.map(row => widthOf(runningText(row, 0).map(seg => seg.text).join(''))))
+  const widest = Math.min(BAND_TITLE_COLUMNS, Math.max(0, ...running.map(row => widthOf(row.title))))
+
+  return Math.max(Math.min(widest, BAND_MIN_TITLE_COLUMNS), Math.min(widest, columns - rest))
+}
+
+/**
+ * A session asking a permission on the terminal: a `╭─ 需要你 ─╮` frame in warning `width` wide, the head, the task and the request,
+ * then the button, and 工作台 after it when `onOpen` is given.
+ */
+function askCard(el: ElementTable, row: AskRow, width: number, onAsk: () => void, onOpen?: () => void) {
+  const { Box, Button, Text } = el
+  const inner = Math.max(0, width - 4)
+  const title = ` ${t().needsYou} `
+  const labelColumns = Math.max(widthOf(t().askTask), widthOf(t().askRequest)) + 2
+  const framed = (body: RenderChildren, used: number) => (
+    <Text wrap="truncate">
+      <Text color="warning">{'│ '}</Text>
+      {body}
+      {' '.repeat(Math.max(0, inner - used))}
+      <Text color="warning">{' │'}</Text>
+    </Text>
+  )
+  const lineRow = (line: Line) => {
+    const fitted = fitLine(line, inner)
+
+    return framed(
+      fitted.map(seg => (
+        <Text {...(seg.color !== undefined && { color: seg.color })} {...(seg.bold === true && { bold: true })} {...(seg.dim === true && { dimColor: true })}>
+          {seg.text}
+        </Text>
+      )),
+      widthOf(fitted.map(seg => seg.text).join('')),
+    )
+  }
+  const kvRow = (label: string, value: string): Line => [{ text: padTo(label, labelColumns), color: 'subtle' }, { text: value, bold: true }]
+
+  return (
+    <Box flexDirection="column">
+      <Text wrap="truncate">
+        <Text color="warning">{'╭─'}</Text>
+        <Text color="warning" bold>
+          {title}
+        </Text>
+        <Text color="warning">{`${'─'.repeat(Math.max(0, width - 3 - widthOf(title)))}╮`}</Text>
+      </Text>
+      {lineRow([{ text: '!', color: 'warning' }, { text: ` ${row.head}`, bold: true }, { text: `  · ${row.waited}`, dim: true }])}
+      {lineRow(kvRow(t().askTask, row.task))}
+      {lineRow(kvRow(t().askRequest, row.request))}
+      <Box>
+        <Text color="warning">{'│ '}</Text>
+        <Button key={`ask-${row.id}`} label={t().askHandle} onPress={onAsk} />
+        {onOpen === undefined ? null : <Text> </Text>}
+        {onOpen === undefined ? null : <Button key="dash-open" label={t().workbench} onPress={onOpen} />}
+        <Text>{' '.repeat(Math.max(0, inner - widthOf(t().askHandle) - 4 - (onOpen === undefined ? 0 : buttonColumns())))}</Text>
+        <Text color="warning">{' │'}</Text>
+      </Box>
+      <Text color="warning" wrap="truncate">{`╰${'─'.repeat(Math.max(0, width - 2))}╯`}</Text>
+    </Box>
+  )
+}
+
+/** One result of an agent: an agent sent on ends again under the same id. */
+const resultKey = (run: AgentRun) => `${run.agentId}@${run.endedAt ?? ''}`
+
+/** Marks an agent's new result read: off the band and out of its unread count; the agents that ended before it stay as they were. */
+async function dismissResult($: EngineInterface, agentId: string): Promise<void> {
+  const run = (await read($, agents)).find(one => one.agentId === agentId)
+
+  if (run !== undefined) {
+    bandDismissed = [...bandDismissed.filter(key => key !== resultKey(run)), resultKey(run)].slice(-MAX_AGENTS)
+  }
+
+  await redraw($)
+}
+
+/** A usage gauge's tone: normal under 80%, a warning to 95%, an error from there. */
+const usageTone = (percent: number): Tone => (percent < 80 ? 'running' : percent < 95 ? 'stale' : 'failed')
+
+/** The time to a reset: `42m`, `1h05`, `3d4h` past a day. */
+function countdown(ms: number): string {
+  if (ms < 3_600_000) {
+    return ms < 60_000 ? '<1m' : `${Math.floor(ms / 60_000)}m`
+  }
+
+  return ms < DAY_MS ? `${Math.floor(ms / 3_600_000)}h${String(Math.floor((ms % 3_600_000) / 60_000)).padStart(2, '0')}` : `${Math.floor(ms / DAY_MS)}d${Math.floor((ms % DAY_MS) / 3_600_000)}h`
+}
+
+/** The element table with each Client, the pane's only ones being lineText's clocks, drawn as the static time the clock would show first. */
+export function staticClocks(el: El): El {
+  const { Text } = el
+
+  return {
+    ...el,
+    Client: props => {
+      const clock = props.props as { from: number; now: number; format: 'duration' | 'age'; color: string; bold: boolean }
+
+      return (
+        <Text color={clock.color} bold={clock.bold}>
+          {(clock.format === 'age' ? fmtAge : fmtDuration)(clock.now - clock.from)}
+        </Text>
+      )
+    },
+  }
 }
 
 /** The timeline page is on screen with a turn that has not ended: its running times move. */
@@ -554,7 +885,8 @@ async function isTimelineLive($: EngineInterface): Promise<boolean> {
 async function isLive($: EngineInterface): Promise<boolean> {
   return (
     (await read($, agents)).some(one => one.state === 'running') ||
-    (await boardNow($)).entries.some(entry => entry.tier !== 1 && entry.group !== CACHE_GROUP) ||
+    // Running checks show no time.
+    (await boardNow($)).entries.some(entry => entry.tier !== 1 && entry.group !== CACHE_GROUP && !(entry.group === CI_GROUP && entry.tier === 3)) ||
     (await isTimelineLive($))
   )
 }
@@ -568,12 +900,12 @@ async function pickTurn($: EngineInterface, turnId: string | null): Promise<void
   await ensureTicker($)
 }
 
-/** Closes the running agents the engine lists as ended (killed ones get no turn.complete), asking at most every AGENT_LIST_MS while one is quiet. */
+/** Closes the agents the engine lists as ended (killed ones get no turn.complete), asking at most every AGENT_LIST_MS while one is quiet or idle. */
 async function reconcileAgents($: EngineInterface): Promise<void> {
   const now = await $.clock.now()
 
   // Quiet by its last tool end alone: a killed agent's call in flight never ends on the timeline.
-  if (now - agentsListedAt < AGENT_LIST_MS || !(await read($, agents)).some(one => isStalled(one, now))) {
+  if (now - agentsListedAt < AGENT_LIST_MS || !(await read($, agents)).some(one => one.state === 'idle' || isStalled(one, now))) {
     return
   }
 
@@ -697,7 +1029,34 @@ async function readText($: EngineInterface, path: string): Promise<string> {
   }
 }
 
+/** This session's id, which mmrun writes into the runs it starts; null when the engine does not give it. */
+async function sessionIdOf($: EngineInterface): Promise<string | null> {
+  try {
+    return await $.session.id()
+  } catch {
+    return null
+  }
+}
+
+/** The model with what <name>.events.jsonl says, its first line read only while the session it names is not known yet; a read that fails adds nothing. */
+async function readModelEvents($: EngineInterface, dir: string, name: string, mtimes: Map<string, number>, old: MmModel | undefined, model: MmModel): Promise<MmModel> {
+  if (!mtimes.has(`${name}.events.jsonl`)) {
+    return model
+  }
+
+  const path = `${dir}/${name}.events.jsonl`
+  const head = old?.claudeSession === undefined ? await $.process.run(['head', '-n', '1', path], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null) : null
+  const tail = await $.process.run(['tail', '-c', String(EVENTS_TAIL_BYTES), path], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+  const known = old?.claudeSession === undefined ? model : { ...model, claudeSession: old.claudeSession }
+
+  return applyEvents(known, [head, tail].map(read => (read?.exitCode === 0 ? read.stdout : '')).join('\n'))
+}
+
 async function readModel($: EngineInterface, dir: string, name: string, mtimes: Map<string, number>, now: number, old: MmModel | undefined): Promise<MmModel> {
+  return readModelEvents($, dir, name, mtimes, old, await readStatus($, dir, name, mtimes, now, old))
+}
+
+async function readStatus($: EngineInterface, dir: string, name: string, mtimes: Map<string, number>, now: number, old: MmModel | undefined): Promise<MmModel> {
   const started = Number((await readText($, `${dir}/${name}.started`)).trim())
   const model: MmModel = {
     name,
@@ -845,6 +1204,26 @@ async function loadReport($: EngineInterface, runid: string, showAll: boolean): 
   await update($, reports, was => ({ ...was, [runid]: { loadedAt, models } }))
 }
 
+/** The legend of the Reviews list: each finished run shown there read once, again when read before it moved; the reader reads its own run. */
+async function loadListed($: EngineInterface): Promise<void> {
+  const loaded = await read($, reports)
+
+  for (const run of (await read($, runs))?.runs.slice(0, PANE_RUNS) ?? []) {
+    const isDone = run.models.length > 0 && run.models.every(model => model.status !== 'RUNNING')
+    const report = loaded[run.runid]
+
+    if (isDone && (report === undefined || isReportStale(run, report)) && !listLoads.has(run.runid)) {
+      listLoads.add(run.runid)
+
+      try {
+        await loadReport($, run.runid, false)
+      } finally {
+        listLoads.delete(run.runid)
+      }
+    }
+  }
+}
+
 async function readRun($: EngineInterface, runid: string): Promise<void> {
   await update($, detail, (): DashDetail => ({ page: 'mmrun', runid, showAll: false }))
   await loadReport($, runid, false)
@@ -916,9 +1295,62 @@ async function toggleSeverity($: EngineInterface): Promise<void> {
   await loadReport($, open.runid, !open.showAll)
 }
 
-/** The desktop reader's model picked: its first shown finding. */
+/** The desktop reader's model picked: its first shown finding, or its transcript read again in the conversation view. */
 async function pickReportModel($: EngineInterface, model: string): Promise<void> {
   await update($, detail, open => (open?.page === 'mmrun' ? { ...open, model, finding: 0 } : open))
+  await readConversation($)
+}
+
+async function pickReportView($: EngineInterface, view: 'report' | 'conversation'): Promise<void> {
+  await update($, detail, open => (open?.page === 'mmrun' ? { ...open, view } : open))
+  await readConversation($)
+}
+
+/** The open reader's model, and its run: the one picked, else the first. */
+async function readerModel($: EngineInterface): Promise<{ runid: string; model: MmModel } | null> {
+  const open = await read($, detail)
+
+  if (open?.page !== 'mmrun') {
+    return null
+  }
+
+  const { runid, model: picked } = open
+  const run = (await read($, runs))?.runs.find(one => one.runid === runid)
+  const model = run?.models.find(one => one.name === picked) ?? run?.models[0]
+
+  return model === undefined ? null : { runid, model }
+}
+
+/** Only under the codex and grok session roots, so an events line cannot point the read anywhere else. */
+async function isTranscriptPath($: EngineInterface, path: string): Promise<boolean> {
+  const home = (await $.env.get('HOME')) ?? ''
+  const codexHome = await $.env.get('CODEX_HOME')
+  const roots = [...(home === '' ? [] : [`${home}/.codex/sessions/`, `${home}/.grok/sessions/`]), ...(codexHome ? [`${codexHome}/sessions/`] : [])]
+
+  return path.startsWith('/') && !path.includes('/../') && roots.some(root => path.startsWith(root))
+}
+
+/** Reads the open reader's model transcript into `conversation` while the reader shows its conversation view; a path outside the roots reads as unreadable. */
+async function readConversation($: EngineInterface): Promise<void> {
+  const open = await read($, detail)
+  const shown = await readerModel($)
+  const path = shown?.model.transcriptPath
+
+  if (open?.page !== 'mmrun' || open.view !== 'conversation' || shown === null || path === undefined) {
+    return
+  }
+
+  const tail = (await isTranscriptPath($, path)) ? await $.process.run(['tail', '-c', String(TRANSCRIPT_TAIL_BYTES), path], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null) : null
+  const found = tail?.exitCode === 0 ? conversationOf(tail.stdout) : null
+  const readAt = await $.clock.now()
+  const now = await readerModel($)
+
+  // Another model or run picked while this read: that one's read owns `conversation`.
+  if (now?.runid !== shown.runid || now.model.name !== shown.model.name) {
+    return
+  }
+
+  await update($, conversation, () => ({ runid: shown.runid, model: shown.model.name, readAt, items: found?.items ?? null, dropped: found?.dropped ?? 0 }))
 }
 
 async function pickFinding($: EngineInterface, finding: number): Promise<void> {
@@ -941,6 +1373,8 @@ async function tickRuns($: EngineInterface): Promise<void> {
 
     isRunsAsked = false
 
+    // A model that ended since the last poll may have written its last reply after that poll's read.
+    const wasReaderRunning = (await readerModel($))?.model.status === 'RUNNING'
     const polled = await pollRuns($, prev)
 
     runsPolledAt = polled.polledAt
@@ -959,6 +1393,10 @@ async function tickRuns($: EngineInterface): Promise<void> {
 
       if (run !== undefined && report !== undefined && isReportStale(run, report)) {
         await loadReport($, open.runid, open.showAll)
+      }
+
+      if (open.view === 'conversation' && (wasReaderRunning || (await readerModel($))?.model.status === 'RUNNING')) {
+        await readConversation($)
       }
     }
 
@@ -990,7 +1428,14 @@ async function runsOnScreen($: EngineInterface, snap: MmSnapshot): Promise<Set<s
 
   const open = await read($, detail)
 
-  return new Set(open?.page === 'mmrun' ? [open.runid] : snap.runs.slice(0, PANE_RUNS).map(run => run.runid))
+  if (open?.page === 'mmrun') {
+    return new Set([open.runid])
+  }
+
+  const sessionId = await sessionIdOf($)
+  const isFoldOpen = await read($, runsFoldOpen)
+
+  return new Set(snap.runs.slice(0, PANE_RUNS).filter(run => isFoldOpen || runSession(run, sessionId) !== false).map(run => run.runid))
 }
 
 // Worktrees and the session state file, for the overview.
@@ -1091,6 +1536,246 @@ async function tickWorkspace($: EngineInterface): Promise<void> {
   }
 
   await collectWorkspace($)
+}
+
+// The branch PR's CI (E2) and the repository's notices (E3): polled, drawn on the band, never a turn.
+
+/** The repository's main worktree, which all its sessions share; else the session root. */
+async function repoRoot($: EngineInterface): Promise<string> {
+  return (await $.session.repo().catch(() => null))?.root ?? (await $.session.root())
+}
+
+/** `gh` run in `dir`; 'blocked', and no `gh` run for CI_RETRY_MS, when it is missing or not logged in; 'failed' when it timed out or else could not run this time. */
+async function gh($: EngineInterface, dir: string, argv: string[]) {
+  const r = await $.process.run(argv, { cwd: dir, timeoutMs: GIT_TIMEOUT_MS }).catch((error: unknown) => (isNotFound(error) ? null : ('failed' as const)))
+
+  if (r === 'failed') {
+    return r
+  }
+
+  if (r === null || r.exitCode === 127 || isNoAuth(r.exitCode, r.stderr)) {
+    ghBlockedUntil = (await $.clock.now()) + CI_RETRY_MS
+
+    return 'blocked' as const
+  }
+
+  return r
+}
+
+/** Keeps the status, with a ci.result line in the event ledger when the PR's overall state changed, and redraws the band. */
+async function setCi($: EngineInterface, status: CiStatus | null): Promise<void> {
+  const was = ciStatus
+
+  if (was === null && status === null) {
+    return
+  }
+
+  ciStatus = status
+  await emitCi($, ciEvents(was, status))
+  await redraw($)
+}
+
+/** Adds `events` to this session's CI file of today, `<session>.ci.jsonl`: one writer per file. The ledger only watches: its failure is never the CI row's. */
+async function emitCi($: EngineInterface, events: readonly LedgerEvent[]): Promise<void> {
+  if (events.length === 0) {
+    return
+  }
+
+  try {
+    const at = await $.clock.now()
+    const session = await $.session.id()
+    const path = `${eventLedgerDir((await $.env.get('HOME')) ?? '', projectKey(await repoRoot($)))}/${dayOf(at)}/${session}.ci.jsonl`
+    const added = events.map(one => eventLine(at, session, one))
+
+    await ciChain(async () => {
+      // Only a missing file reads as empty: one that exists but will not read throws, so it is never written over.
+      const lines = ciKept?.path === path ? ciKept.lines : (await $.fs.exists(path)) ? String(await $.fs.read(path)).split('\n').filter(line => line !== '') : []
+
+      // Kept before the write: a write that fails is made again by the next.
+      ciKept = { path, lines: capped([...lines, ...added]) }
+      await $.fs.write(path, `${ciKept.lines.join('\n')}\n`)
+    })
+  } catch {
+    // Dropped: a missing line beats a broken CI row.
+  }
+}
+
+/** Today's event ledger of this project, every writer's `*.jsonl` of the date directory; a file that cannot be read is left out. */
+async function readEventLedger($: EngineInterface): Promise<EventsRead> {
+  const dir = `${eventLedgerDir((await $.env.get('HOME')) ?? '', projectKey(await repoRoot($)))}/${dayOf(await $.clock.now())}`
+  const session = await $.session.id()
+  const kept = new Map<string, { size: number; mtimeMs: number; records: LedgerRecord[] }>()
+
+  for (const entry of await $.fs.list(dir).catch(() => [])) {
+    if (entry.kind !== 'file' || !entry.name.endsWith('.jsonl')) {
+      continue
+    }
+
+    const path = `${dir}/${entry.name}`
+    const was = ledgerFiles.get(path)
+
+    if (was !== undefined && was.size === entry.size && was.mtimeMs === entry.mtimeMs) {
+      kept.set(path, was)
+      continue
+    }
+
+    const text = await $.fs.read(path).then(String, () => null)
+
+    if (text !== null) {
+      kept.set(path, { size: entry.size, mtimeMs: entry.mtimeMs, records: parseLedger(text, sessionOfFile(entry.name)) })
+    }
+  }
+
+  ledgerFiles = kept
+
+  return groupEvents([...kept.values()].flatMap(one => one.records), session)
+}
+
+/** The checks of the open PR of the session root's branch; no row without a branch, a PR or a check. */
+async function pollCi($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+
+  if (now < ghBlockedUntil) {
+    return
+  }
+
+  const root = await $.session.root()
+  const head = await git($, root, ['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => null)
+  const branch = head?.exitCode === 0 ? head.stdout.trim() : ''
+
+  if (!/^\S+$/.test(branch) || branch === 'HEAD') {
+    await setCi($, null)
+
+    return
+  }
+
+  const view = await gh($, root, PR_VIEW)
+
+  // This fetch failed: the row stays as last polled.
+  if (view === 'failed' || (view !== 'blocked' && view.exitCode !== 0 && !isNoPr(view.stderr))) {
+    return
+  }
+
+  const pr = view !== 'blocked' && view.exitCode === 0 ? parsePr(view.stdout) : null
+  const checks = pr === null ? null : await gh($, root, PR_CHECKS)
+
+  if (checks === 'failed') {
+    return
+  }
+
+  // gh exits nonzero while a check fails or runs: the list is read whatever the exit. gh missing or not logged in: no row.
+  const list = checks === null || checks === 'blocked' ? null : parseChecks(checks.stdout)
+
+  await setCi($, pr === null || list === null || list.length === 0 ? null : nextCi(ciStatus, pr, list, now))
+  await ensureTicker($)
+}
+
+/** Reads main's sha, master's without a main: a move not made by this session leaves one notice per sha. `isOwn`: this session's git command just ran. */
+async function checkMain($: EngineInterface, isOwn: boolean): Promise<void> {
+  const root = await repoRoot($)
+
+  // Another repository: its main is read as a new baseline, and its notices are another directory's.
+  if (root !== noticeBoard.mainRoot) {
+    noticeBoard = { ...noticeBoard, mainSha: null, mainRoot: root }
+    noticeFiles = new Map()
+  }
+
+  for (const branch of ['main', 'master']) {
+    const r = await git($, root, ['rev-parse', '--verify', '--quiet', branch]).catch(() => null)
+    const sha = r?.exitCode === 0 ? shaOf(r.stdout) : null
+
+    if (sha !== null) {
+      const moved = mainMoved(noticeBoard.mainSha, sha, isOwn, branch, await $.session.id(), await $.clock.now())
+
+      noticeBoard = { ...noticeBoard, mainSha: moved.sha, ...(moved.notice !== null && { auto: moved.notice }) }
+
+      if (moved.notice !== null) {
+        await redraw($)
+      }
+
+      return
+    }
+  }
+}
+
+async function tickRepo($: EngineInterface): Promise<void> {
+  await checkMain($, false)
+  await pollCi($)
+}
+
+async function noticesPath($: EngineInterface): Promise<string> {
+  return noticesDir((await $.env.get('HOME')) ?? '', await repoRoot($))
+}
+
+/** This repository's notice files: each name read until it reads as a notice, an expired file removed. */
+async function readNotices($: EngineInterface): Promise<void> {
+  const dir = await noticesPath($)
+  const now = await $.clock.now()
+  const kept = new Map<string, Notice | null>()
+
+  for (const entry of await $.fs.list(dir).catch(() => [])) {
+    if (entry.kind !== 'file' || !entry.name.endsWith('.json')) {
+      continue
+    }
+
+    const path = `${dir}/${entry.name}`
+    const notice = noticeFiles.has(entry.name) ? (noticeFiles.get(entry.name) ?? null) : parseNotice(String(await $.fs.read(path).catch(() => '')))
+
+    if (now - entry.mtimeMs > NOTICE_TTL_MS || (notice !== null && isExpired(notice, now))) {
+      await $.process.run(['rm', '-f', path], { timeoutMs: GIT_TIMEOUT_MS }).catch(() => null)
+      continue
+    }
+
+    // A file another session is still writing reads as none: it is read again next time.
+    if (notice !== null) {
+      kept.set(entry.name, notice)
+    }
+  }
+
+  noticeFiles = kept
+
+  const list = [...kept.values()].filter((one): one is Notice => one !== null)
+
+  if (!isSame(noticeBoard.list.map(one => one.id), list.map(one => one.id))) {
+    noticeBoard = { ...noticeBoard, list }
+    await redraw($)
+  }
+}
+
+/** The notice the band shows: the newest neither expired nor cleared. */
+function noticeNow(now: number): Notice | null {
+  const { list, auto, clearedAt } = noticeBoard
+
+  return newestNotice(auto === null ? list : [...list, auto], clearedAt, now)
+}
+
+/** `/notice <text>` posts to every session of the repository; `/notice clear` hides the current ones in this session. */
+async function postNotice($: EngineInterface, args: string): Promise<void> {
+  const now = await $.clock.now()
+
+  if (args.trim() === 'clear') {
+    noticeBoard = { ...noticeBoard, clearedAt: now }
+    await redraw($)
+    $.ui.toast(t().noticeCleared)
+
+    return
+  }
+
+  const notice = noticeOf(await $.session.id(), now, args)
+
+  if (notice === null) {
+    $.ui.toast(t().noticeUsage)
+
+    return
+  }
+
+  const name = `${notice.id}.json`
+
+  await $.fs.write(`${await noticesPath($)}/${name}`, JSON.stringify(notice))
+  noticeFiles.set(name, notice)
+  noticeBoard = { ...noticeBoard, list: [...noticeBoard.list.filter(one => one.id !== notice.id), notice] }
+  await redraw($)
+  $.ui.toast(t().noticePosted)
 }
 
 // Other sessions: each writes only its own ~/.claude/dashboard/sessions/<id>.json and reads the others'.
@@ -1512,7 +2197,7 @@ async function canvasUrl($: EngineInterface): Promise<string | null> {
   return typeof url === 'string' && url.startsWith('https://') ? url : null
 }
 
-/** Opens the workbench on `to`; visiting Agents or Reviews marks what has ended there as read. */
+/** Opens the workbench on `to`; visiting Agents or Reviews marks what has ended there as read, any page the CI result. */
 async function goTo($: EngineInterface, to: DashPage): Promise<void> {
   const now = await $.clock.now()
 
@@ -1526,9 +2211,7 @@ async function goTo($: EngineInterface, to: DashPage): Promise<void> {
     await update($, agentsSeenBefore, () => before)
   }
 
-  if (to === 'agents' || to === 'mmrun') {
-    await update($, seen, was => (to === 'agents' ? { ...was, agents: now } : { ...was, runs: now }))
-  }
+  await update($, seen, was => (to === 'agents' ? { ...was, agents: now, ci: now } : to === 'mmrun' ? { ...was, runs: now, ci: now } : { ...was, ci: now }))
 
   await $.ui.open({ id: PANE_ID, title: t().workbench })
   await syncStatus($)
@@ -1908,6 +2591,10 @@ function start($: EngineInterface): void {
   poll($, 'workspace', WORKSPACE_MS, () => tickWorkspace($))
   poll($, 'peers', PEERS_MS, () => tickPeers($))
   poll($, 'heartbeat', HEARTBEAT_MS, () => heartbeat($))
+  // The redraw timer stops with nothing live, idle agents included.
+  poll($, 'agents', AGENT_LIST_MS, () => reconcileAgents($))
+  void poll($, 'repo', CI_POLL_MS, () => tickRepo($)).now()
+  void poll($, 'notices', NOTICES_MS, () => readNotices($)).now()
 }
 
 export const register: Register = (on, options) => {
@@ -2233,6 +2920,19 @@ export const register: Register = (on, options) => {
   })
 
   // Classic tool events, not `tool.call`: a mod hooking Bash there denies every Bash call of a worktree subagent (claude-code#92533).
+  // Main read before this session's git command runs: a move made before it is another session's, and gets its notice.
+  on('classic.PreToolUse', { tool: /^Bash$/ }, async ($, e, next) => {
+    if (e.tool === 'Bash' && MAIN_CHANGE.test(e.command)) {
+      await checkMain($, false)
+    }
+
+    return next(e)
+  }).catch(($, e, next) => {
+    hookFailed($, 'classic.PreToolUse', next.error)
+
+    return next(e)
+  })
+
   on('classic.PostToolUse', async ($, e, next) => {
     const agentId = e.agent_id
     const input = typeof e.tool_input === 'object' && e.tool_input !== null ? (e.tool_input as Record<string, unknown>) : {}
@@ -2259,6 +2959,10 @@ export const register: Register = (on, options) => {
 
     if (e.tool_name === 'Bash' && typeof input.command === 'string' && GIT_CHANGE.test(input.command)) {
       await collectWorkspace($)
+    }
+
+    if (e.tool_name === 'Bash' && typeof input.command === 'string' && MAIN_CHANGE.test(input.command)) {
+      await checkMain($, true)
     }
 
     if (EDIT_TOOLS.includes(e.tool_name)) {
@@ -2291,6 +2995,11 @@ export const register: Register = (on, options) => {
       const input = typeof e.tool_input === 'object' && e.tool_input !== null ? (e.tool_input as Record<string, unknown>) : {}
 
       await noteGate($, input.command, e.error, e.cwd, e.agent_id, true)
+
+      // A git command that failed part way may have moved main all the same.
+      if (typeof input.command === 'string' && MAIN_CHANGE.test(input.command)) {
+        await checkMain($, true)
+      }
     }
 
     return next(e)
@@ -2426,6 +3135,16 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('command.run', { command: 'notice' }, async ($, e) => {
+    await postNotice($, e.args)
+
+    return {}
+  }).catch(($, e, next) => {
+    hookFailed($, 'command.run notice', next.error)
+
+    return next(e)
+  })
+
   on('command.run', { command: 'gpu' }, async ($, e) => {
     return connectGpu($, e.args)
   }).catch(($, e, next) => {
@@ -2472,11 +3191,26 @@ export const register: Register = (on, options) => {
 
     const bNow = await boardNow($)
 
+    // A drawing may not write state: the read runs from a timer, and the atom's update draws the band again.
+    if (bNow.now - progressReadAt >= PROGRESS_READ_MS) {
+      progressReadAt = bNow.now
+      $.clock.after(0, () => void collectProgress($).catch(() => undefined))
+    }
+
     armBandWake($, nextBandChange(await read($, gates), bNow.now, await read($, trees)), bNow.now)
 
-    const board = bandLines(bNow, Math.min(e.props.maxRows, MAX_BAND_ROWS), e.props.bodyColumns - buttonColumns())
-    const lines = board.length === 0 ? [await idleNow($)] : board
+    const rows = Math.min(e.props.maxRows, MAX_BAND_ROWS)
+    const columns = e.props.bodyColumns - buttonColumns()
+    const lines = bandLines(bNow, rows, columns)
+    const shown: BandRow[] = lines.length === 0 ? [{ kind: 'idle', line: await idleNow($) }] : bandRowsOf(bNow, lines, rows, (await read($, peers)) ?? [], e.props.maxRows)
+    const notice = noticeNow(bNow.now)
+    const used = shown.reduce((sum, row) => sum + (row.kind === 'ask' ? ASK_CARD_ROWS : 1), 0)
+    // P4: the notice takes a row only while the budget has one left.
+    const noticed: BandRow[] = notice !== null && shown.length < rows && used < e.props.maxRows ? [...shown, { kind: 'notice', text: noticeText(notice) }] : shown
+    const plan = planRowOf(await read($, progress))
+    const bandRows = withinBand(plan === null ? noticed : [plan, ...noticed], rows, e.props.maxRows)
     const needsYou = bNow.entries.some(entry => entry.tier === 1)
+    const onOpen = () => void goTo($, 'overview')
 
     if (e.surface === 'desktop') {
       const el = $.ui.resolve(e)
@@ -2484,37 +3218,51 @@ export const register: Register = (on, options) => {
 
       return (
         <Box flexDirection="column">
-          {drawDesktopBand(el, lines, () => void goTo($, 'overview'), needsYou)}
+          {drawDesktopBand(el, bandRows, { onOpen, onAsk: onOpen, onDismiss: agentId => void dismissResult($, agentId) }, needsYou)}
           {await next(e)}
         </Box>
       )
     }
 
-    const { Box, Button, Text } = $.ui.resolve(e)
+    const el = $.ui.resolve(e)
+    const { Box, Button, Text } = el
     const width = e.props.bodyColumns
-    const draw = (line: Line, columns: number) => (
-      <Text wrap="truncate">
-        {fitLine(line, columns).map(seg => (
-          <Text
-            {...(seg.color !== undefined && { color: seg.color })}
-            {...(seg.bold === true && { bold: true })}
-            {...(seg.dim === true && { dimColor: true })}
-          >
-            {seg.text}
-          </Text>
-        ))}
-      </Text>
-    )
+    const titleColumns = runningTitleColumns(bandRows, columns)
+    const segs = (line: Line) =>
+      line.map(seg => (
+        <Text
+          {...(seg.color !== undefined && { color: seg.color })}
+          {...(seg.bold === true && { bold: true })}
+          {...(seg.dim === true && { dimColor: true })}
+        >
+          {seg.text}
+        </Text>
+      ))
+    const draw = (line: Line, columns: number) => <Text wrap="truncate">{segs(fitLine(line, columns))}</Text>
+    const lineOf = (row: Exclude<BandRow, AskRow | NoticeRow>) =>
+      row.kind === 'idle' ? idleText(row.line) : row.kind === 'running' ? runningText(row, titleColumns) : row.kind === 'plan' ? planText(row) : row.line
+    const opener = bandRows.findIndex(row => row.kind !== 'ask' && row.kind !== 'notice')
 
     return (
       <Box flexDirection="column">
         <Box flexDirection="column">
-          <Box>
-            {draw(lines[0] ?? [], width - buttonColumns())}
-            <Text> </Text>
-            <Button key="dash-open" label={t().workbench} onPress={() => void goTo($, 'overview')} />
-          </Box>
-          {lines.slice(1).map(line => draw(line, width))}
+          {bandRows.map((row, index) =>
+            row.kind === 'ask' ? (
+              askCard(el, row, width, onOpen, opener < 0 ? onOpen : undefined)
+            ) : row.kind === 'notice' ? (
+              <Text dimColor wrap="truncate">
+                {fit(row.text, width)}
+              </Text>
+            ) : index === opener ? (
+              <Box>
+                {draw(lineOf(row), width - buttonColumns())}
+                <Text> </Text>
+                <Button key="dash-open" label={t().workbench} onPress={onOpen} />
+              </Box>
+            ) : (
+              draw(lineOf(row), width)
+            ),
+          )}
         </Box>
         {await next(e)}
       </Box>
@@ -2574,28 +3322,49 @@ export const register: Register = (on, options) => {
 
     await read($, tick)
 
-    const { rateLimits, cost } = await read($, measured)
+    const { context, rateLimits, cost } = await read($, measured)
     const now = await $.clock.now()
     const order = (kind: string) => (kind === 'five_hour' ? 0 : kind === 'seven_day' ? 1 : 2)
     const windows = [...rateLimits].sort((a, b) => order(a.kind) - order(b.kind))
     const costText = windows.length === 0 && cost !== null ? [`$${cost.usd.toFixed(2)}`] : []
     const label = [...e.props.modes, ...costText].join(' & ')
-    const { Box, Button, Svg, Text } = $.ui.resolve(e)
+    const el = $.ui.resolve(e)
+    const { Box, Button, Text } = el
+    const hasLabels = (e.viewport?.columns ?? MODE_LABEL_COLUMNS) >= MODE_LABEL_COLUMNS
+    const gauges = [
+      ...(context?.percent === undefined ? [] : [{ key: 'context', percent: context.percent, label: t().contextWord, alt: t().context(`${context.percent}%`) }]),
+      ...windows.map(limit => {
+        const resetsAt = limit.resetsAt === undefined ? NaN : Date.parse(limit.resetsAt)
+        const name = WINDOW_NAMES[limit.kind] ?? limit.kind
+
+        return {
+          key: limit.kind,
+          percent: limit.percentUsed,
+          label: Number.isNaN(resetsAt) ? name : `${name} · ${t().limitReset(countdown(Math.max(0, resetsAt - now)))}`,
+          alt: limitText(limit, now),
+        }
+      }),
+    ]
 
     return (
       <Box flexDirection="row" columnGap={1} alignItems="center">
-        {label === '' ? null : <Text color="subtle">{label}</Text>}
-        {windows.map(limit => {
-          const text = limitText(limit, now)
-          const color = limit.percentUsed < 70 ? FILL.done : limit.percentUsed < 90 ? FILL.stale : FILL.failed
+        {label === '' ? null : (
+          <Text color="subtle" wrap="truncate-end">
+            {label}
+          </Text>
+        )}
+        {gauges.map(one => {
+          const tone = usageTone(one.percent)
 
           return (
-            <Box key={`limit-${limit.kind}`} flexDirection="row" columnGap={1} alignItems="center">
-              <Svg source={horizontalGauge(limit.percentUsed / 100, color, false, 40, 12)} alt={text} width={40} height={12} />
-              <Text color="subtle">{text}</Text>
+            <Box key={`limit-${one.key}`} flexDirection="row" columnGap={1} alignItems="center" flexShrink={0}>
+              {gauge(el, one.percent / 100, tone, one.alt, MODE_RING_PX)}
+              <Text color={tone === 'running' ? 'text' : TONE_KEYS[tone]} bold>{`${one.percent}%`}</Text>
+              {hasLabels ? <Text color="subtle">{one.label}</Text> : null}
             </Box>
           )
         })}
+        <Box flexGrow={1} />
         <Button key="mode-workbench" label={t().workbench} variant="secondary" onPress={() => void goTo($, 'overview')} />
         <Button key="mode-progress" label={t().pageProgress} variant="secondary" onPress={() => void goTo($, 'progress')} />
       </Box>
@@ -2643,6 +3412,22 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A failed clock Client: logged, and the times drawn as static text for the rest of the session.
+  on('ui.fault', async ($, e, next) => {
+    $.ui.log(`dashboard: ${e.component} Client ${e.module} failed (${e.phase}): ${e.reason}`, { to: 'debug' })
+
+    if (e.module.endsWith('clock-client.tsx')) {
+      isClockFailed = true
+      await update($, paneWake, was => was + 1)
+    }
+
+    return next(e)
+  }).catch(($, e, next) => {
+    hookFailed($, 'ui.fault', next.error)
+
+    return next(e)
+  })
+
   // Workbench pane
 
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
@@ -2658,13 +3443,18 @@ export const register: Register = (on, options) => {
 
       await read($, paneWake)
 
-      if (isOn('agents', 'mmrun', 'timeline', 'progress')) {
+      // A static time moves only as the pane redraws.
+      if (isClockFailed || isOn('agents', 'mmrun', 'timeline', 'progress')) {
         await read($, tick)
       }
 
       const now = await $.clock.now()
 
-      const data: PaneData = {
+      if (isOn('mmrun') && open?.page !== 'mmrun') {
+        void loadListed($)
+      }
+
+      const data: TimelinePaneData & GpuFill = {
         page: current,
         pages: pagesShown(current),
         now,
@@ -2676,6 +3466,7 @@ export const register: Register = (on, options) => {
         gpuHosts: autoHosts,
         onConnectGpu: host => void connectGpu($, host),
         onChangeGpuHost: () => void forgetGpu($),
+        onFillGpu: () => void $.prompt.fill({ text: '/gpu ' }),
         disclosures: openDisclosures,
         onToggleDisclosure: key => toggleDisclosure($, key),
         gates: isOn('overview') ? await read($, gates) : [],
@@ -2684,12 +3475,16 @@ export const register: Register = (on, options) => {
         peers: isOn('overview') ? ((await read($, peers)) ?? []) : [],
         paneRuns: PANE_RUNS,
         detail: open,
-        reports: open?.page === 'mmrun' && isOn('mmrun') ? await read($, reports) : {},
+        reports: isOn('mmrun') ? await read($, reports) : {},
+        conversation: open?.page === 'mmrun' && open.view === 'conversation' && isOn('mmrun') ? await read($, conversation) : null,
         timeline: isOn('timeline') ? await read($, timeline) : [],
+        ...(isOn('timeline') && openDisclosures.has(EVENTS_VIEW) && { timelineEvents: await readEventLedger($) }),
         timelineTurnId: isOn('timeline') ? ((await read($, timelineTurn)) ?? undefined) : undefined,
         flights: isOn('overview', 'agents') ? await flightsNow($) : new Map(),
         agentsSeenBefore: isOn('agents') ? await read($, agentsSeenBefore) : 0,
         isFoldOpen: isOn('agents') ? await read($, agentsFoldOpen) : false,
+        sessionId: isOn('mmrun') ? await sessionIdOf($) : null,
+        isRunsFoldOpen: isOn('mmrun') ? await read($, runsFoldOpen) : false,
         peek: open?.page === 'agents' && isOn('agents') ? await read($, peek) : null,
         ...(isOn('usage') && { usage: await usageNow($) }),
         progress: isOn('progress') ? await read($, progress) : null,
@@ -2697,6 +3492,7 @@ export const register: Register = (on, options) => {
         onAcceptRequest: id => void closeRequest($, id, { status: 'closed', resolution: { by: 'person', evidence: 'accepted on the progress page' } }),
         onDropRequest: id => void closeRequest($, id, { status: 'dropped' }),
         onToggleFold: () => void update($, agentsFoldOpen, was => !was),
+        onToggleRunsFold: () => void update($, runsFoldOpen, was => !was),
         onTimelineTurn: turnId => void pickTurn($, turnId ?? null),
         timelineView: isOn('timeline') ? await read($, timelineView) : undefined,
         onTimelineView: () => void update($, timelineView, was => (was === 'hotspots' ? 'turn' : 'hotspots')),
@@ -2709,6 +3505,7 @@ export const register: Register = (on, options) => {
         onBack: () => void closeDetail($),
         onToggleSeverity: () => void toggleSeverity($),
         onPickModel: model => void pickReportModel($, model),
+        onPickView: view => void pickReportView($, view),
         onFinding: finding => void pickFinding($, finding),
         onCopyResume: (sessionId, surface) => void copyResume($, sessionId, surface),
         onCopyCd: (path, surface) => void copyCd($, path, surface),
@@ -2722,7 +3519,7 @@ export const register: Register = (on, options) => {
 
       armOverviewWake($, isOn('overview') ? nextOverviewChange(data.agents, data.gates, data.peers, now, data.trees, data.flights ?? new Map()) : null, now)
 
-      return drawDesktopPane($.ui.resolve(e), data)
+      return drawDesktopPane(isClockFailed ? staticClocks($.ui.resolve(e)) : $.ui.resolve(e), data)
     }
 
     await read($, tick)
@@ -2968,32 +3765,45 @@ export const register: Register = (on, options) => {
       const snap = await read($, runs)
       // A failed read keeps the runs it had below this line.
       const unreadable = snap?.error === undefined ? [] : [plain(t().runsUnreadable(snap.error), { color: 'warning' })]
+      const sessionId = await sessionIdOf($)
+      // Runs another session started fold under one row; the rest keep their order.
+      const shownRuns = snap?.runs.slice(0, PANE_RUNS) ?? []
+      const listed = shownRuns.filter(run => runSession(run, sessionId) !== false)
+      const folded = shownRuns.filter(run => runSession(run, sessionId) === false)
+      const isFoldOpen = await read($, runsFoldOpen)
+      const foldRow =
+        folded.length === 0 ? [] : [<Button key="runs-fold" label={t().otherSessionRuns(folded.length)} plain onPress={() => void update($, runsFoldOpen, was => !was)} />]
+      // Every run goes down, the pane scrolls them; a run's head carries its Read button, "[ <label> ]" after a space.
+      const blocks = runTable(isFoldOpen ? [...listed, ...folded] : listed, snap?.polledAt ?? now, columns - widthOf(t().read) - 5).map(block => (
+        <Box flexDirection="column">
+          <Box>
+            {draw(block.head)}
+            <Text> </Text>
+            <Button key={`read-run-${block.run.runid}`} label={t().read} onPress={() => void readRun($, block.run.runid)} />
+          </Box>
+          {block.rows.map(draw)}
+        </Box>
+      ))
 
       body =
         snap === null || snap.runs.length === 0
           ? unreadable.length > 0
             ? unreadable
             : [plain(snap === null ? t().loading : t().noRecentRuns, { dim: true })]
-          : [
-              ...unreadable,
-              // Every run goes down, the pane scrolls them; a run's head carries its Read button, "[ <label> ]" after a space.
-              ...runTable(snap.runs.slice(0, PANE_RUNS), snap.polledAt, columns - widthOf(t().read) - 5).map(block => (
-                <Box flexDirection="column">
-                  <Box>
-                    {draw(block.head)}
-                    <Text> </Text>
-                    <Button key={`read-run-${block.run.runid}`} label={t().read} onPress={() => void readRun($, block.run.runid)} />
-                  </Box>
-                  {block.rows.map(draw)}
-                </Box>
-              )),
-            ]
+          : [...unreadable, ...blocks.slice(0, listed.length), ...foldRow, ...blocks.slice(listed.length)]
     } else if (current === 'timeline') {
       const turns = await read($, timeline)
       const mains = turns.filter(one => one.agentId === undefined).map(one => one.turnId)
       const shown = shownTurnId(turns, await read($, timelineTurn))
       const at = shown === undefined ? -1 : mains.indexOf(shown)
       const isHotspots = (await read($, timelineView)) === 'hotspots'
+      // The steps or events toggle is a disclosure, which redraws through paneWake.
+      await read($, paneWake)
+
+      const isEvents = openDisclosures.has(EVENTS_VIEW)
+      const events = (
+        <Button key="timeline-events" label={isEvents ? t().timelineStepsView : t().timelineEventsView} onPress={() => toggleDisclosure($, EVENTS_VIEW)} />
+      )
       const toggle = (
         <Button
           key="timeline-view"
@@ -3008,7 +3818,9 @@ export const register: Register = (on, options) => {
       ].filter(button => button !== null)
 
       // Stepping between turns is the single turn's; the hotspots take every main turn.
-      body = [<Box columnGap={1}>{[toggle, ...(isHotspots ? [] : nav)]}</Box>, ...(isHotspots ? hotspotLines(turns, columns) : timelineLines(turns, shown ?? '', now, columns, await read($, agents))).map(draw)]
+      body = isEvents
+        ? [<Box columnGap={1}>{events}</Box>, ...eventLines(await readEventLedger($), columns).map(draw)]
+        : [<Box columnGap={1}>{[events, toggle, ...(isHotspots ? [] : nav)]}</Box>, ...(isHotspots ? hotspotLines(turns, columns) : timelineLines(turns, shown ?? '', now, columns, await read($, agents))).map(draw)]
     } else if (current === 'usage') {
       body = usageLines(await usageNow($), columns).map(draw)
     } else if (current === 'progress') {

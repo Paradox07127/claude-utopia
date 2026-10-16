@@ -5,7 +5,9 @@ import type { FsEntry, On, RenderInput, SessionStartInput } from 'claude-code'
 import { widthOf } from '../hooks/agent-model'
 import { commandHead } from '../hooks/board'
 import { drawDesktopPane, modelTone, textCells } from '../hooks/desktop'
+import { FRAME_CELLS, PIXELS_PER_COLUMN } from '../hooks/desktop/kit'
 import type { PaneData } from '../hooks/desktop'
+import { timelineBody } from '../hooks/desktop/timeline'
 import { setLang } from '../hooks/i18n'
 import { reportOf, reviewOf } from '../hooks/runs'
 import type { AgentRun, DashTimelinePage, GateRun, MmSnapshot, TimelineTurn, WorktreeInfo } from '../types'
@@ -205,7 +207,7 @@ describe('the desktop draws cards and charts', () => {
 
     expect(svgs).toHaveLength(1)
     expect(String(svgs[0]?.props.alt)).toContain('已耗时')
-    expect((await pane.find({ type: 'Text', text: 'Build mm plugin' }))?.props).toMatchObject({ bold: true, wrap: 'wrap' })
+    expect((await pane.find({ type: 'Text', text: 'Build mm plugin' }))?.props).toMatchObject({ bold: true, wrap: 'truncate-end' })
     await pane.unmount()
   })
 
@@ -229,8 +231,10 @@ describe('the desktop draws cards and charts', () => {
 
     const pane = await $.ui.mount({ plugin: PLUGIN, ...PANE, surface: 'desktop' } as never)
 
+    // A ring each for utilization and memory, its percent beside it.
     expect(await pane.findAll({ type: 'Svg' })).toHaveLength(2)
-    expect(await pane.find({ type: 'Text', text: '利用率 52%' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '52%' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '利用率' })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: '显存 18.2 / 24.0 GiB' })).toBeDefined()
     await pane.unmount()
   })
@@ -245,8 +249,7 @@ describe('the desktop draws cards and charts', () => {
     expect(await pane.find({ type: 'Text', text: '需要你  ' })).toBeUndefined()
     expect(await pane.find({ type: 'Text', text: '! 需要你 0' })).toBeUndefined()
     expect(await pane.find({ type: 'Text', text: '工作树' })).toBeUndefined()
-    expect(await pane.find({ type: 'Text', text: '运行中  2' })).toBeDefined()
-    expect((await pane.findAll({ type: 'Text', text: '运行中' })).some(one => one.props.bold === true)).toBe(true)
+    expect((await pane.findAll({ type: 'Text', text: '运行中 · 2' })).some(one => one.props.bold === true)).toBe(true)
     expect(await pane.find({ type: 'Text', text: 'worker · Build mm plugin' })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: 'design / codex' })).toBeDefined()
     expect((await pane.find({ key: 'page-overview' }))?.props).toMatchObject({ variant: 'primary' })
@@ -254,7 +257,7 @@ describe('the desktop draws cards and charts', () => {
     await pane.unmount()
   })
 
-  test('总览: a running row is its title beside its Button, then tools plus a time that moves by itself; a quiet agent gets a 静默 chip when it turns quiet', { options: { language: 'zh-CN' } }, async ($, on) => {
+  test('总览: a running row is its title beside its time that moves by itself and its Button, then model and tools; a quiet agent gets a 静默 chip when it turns quiet', { options: { language: 'zh-CN' } }, async ($, on) => {
     const clock = await busy($, on)
     const pane = (await $.ui.mount({ plugin: PLUGIN, ...PANE, surface: 'desktop' } as never)) as Mounted<'desktop'>
 
@@ -263,7 +266,7 @@ describe('the desktop draws cards and charts', () => {
     const rows = (await pane.findAll({ type: 'Box' })).filter(box => box.props.minWidth === 0 && box.props.flexGrow === 1)
 
     expect(rows.length).toBeGreaterThanOrEqual(2)
-    expect(await pane.find({ type: 'Text', text: '0 tools · ' })).toBeDefined()
+    expect(await pane.find({ type: 'Text', text: 'opus-5-5 · 0 tools' })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: '0s', in: 'elapsed-a1' })).toBeDefined()
     await pane.advance(3_000)
     expect(await pane.find({ type: 'Text', text: '3s', in: 'elapsed-a1' }), 'the time moves without a redraw').toBeDefined()
@@ -290,7 +293,7 @@ describe('the desktop draws cards and charts', () => {
     await pane.press({ key: 'overview-agents' })
     await pane.press({ key: 'page-overview' })
     await clock.advance(1_000)
-    expect(await pane.find({ type: 'Text', text: '运行中  1' }), 'codex still runs').toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '运行中 · 1' }), 'codex still runs').toBeDefined()
     expect(await pane.find({ type: 'Text', text: '已返回' })).toBeUndefined()
     await pane.unmount()
   })
@@ -323,11 +326,13 @@ describe('the desktop draws cards and charts', () => {
     const pane = await $.ui.mount({ plugin: PLUGIN, ...PANE, surface: 'desktop' } as never)
 
     await pane.press({ key: 'page-overview' })
-    expect(await pane.find({ type: 'Text', text: '需要你  1' }), 'the errored one alone').toBeDefined()
+    expect(await pane.find({ type: 'Text', text: '需要你 · 1' }), 'the errored one alone').toBeDefined()
 
     await pane.press({ key: 'page-agents' })
-    expect((await pane.find({ type: 'Text', text: '⊘ 已中止' }))?.props).toMatchObject({ color: 'warning' })
-    expect((await pane.find({ type: 'Text', text: '✗ 出错' }))?.props).toMatchObject({ color: 'error' })
+    expect((await pane.find({ type: 'Text', text: '⊘' }))?.props).toMatchObject({ color: 'warning' })
+    expect((await pane.find({ type: 'Text', text: '已中止' }))?.props).toMatchObject({ color: 'warning' })
+    expect((await pane.find({ type: 'Text', text: '✗' }))?.props).toMatchObject({ color: 'error' })
+    expect((await pane.find({ type: 'Text', text: '出错' }))?.props).toMatchObject({ color: 'error' })
     await pane.unmount()
   })
 
@@ -348,9 +353,10 @@ describe('the desktop draws cards and charts', () => {
     const band = await $.ui.mount({ plugin: PLUGIN, ...BAND, surface: 'desktop' } as never)
     const texts = (await band.findAll({ type: 'Text' })).map(one => one.text)
 
-    expect(JSON.stringify(await $.ui.render(BAND)), 'the terminal keeps its columns').toMatch(/ {3,}/)
+    expect(JSON.stringify(await $.ui.render(BAND)), 'the terminal draws its running bar as text').toContain('▱')
     expect(texts.filter(text => / {3,}/.test(text))).toEqual([])
-    expect(texts.join('\n')).toContain('worker  Build mm plugin  ')
+    expect(texts).toContain('Build mm plugin')
+    expect(await band.findAll({ type: 'Svg' }), 'an icon per row, and a K1 bar on the running one').toHaveLength(3)
     await band.unmount()
   })
 
@@ -603,15 +609,21 @@ describe('desktop: the timeline page', () => {
       },
     ]
 
-    for (const [columns, width] of [[40, 328], [60, 498], [80, 464], [120, 572]] as const) {
+    // The lane takes the columns left of a fixed label column (14 on the narrow tier, else 22) and 5 more, within 160–720 px.
+    for (const [columns, width, label] of [[40, 200, 14], [60, 314, 22], [80, 504, 22], [120, 720, 22]] as const) {
       const drawn = drawDesktopPane(EL, paneOf({ page: 'timeline', timeline: turns, columns, agents: [runAgent({ agentId: 'c' })] }))
-      const svgs = nodesOf(drawn, 'Svg')
+      // The legend's three 10 px swatches apart.
+      const svgs = nodesOf(drawn, 'Svg').filter(svg => svg.props?.width !== 10)
 
       expect(svgs.length, `${columns}: the axis, two steps, Bash, the fork, the compaction`).toBe(6)
       expect(new Set(svgs.map(svg => svg.props?.width)), String(columns)).toEqual(new Set([width]))
-      expect(new Set(svgs.map(svg => /viewBox="([^"]+)"/.exec(String(svg.props?.source))?.[1])), String(columns)).toEqual(new Set([`0 0 ${width} 12`]))
+      expect(new Set(svgs.map(svg => /viewBox="([^"]+)"/.exec(String(svg.props?.source))?.[1])), String(columns)).toEqual(new Set([`0 0 ${width} 14`, `0 0 ${width} 16`]))
       // Only labels indent: no Svg sits in a padded Box.
       expect(nodesOf(drawn, 'Box').filter(box => box.props?.paddingLeft !== undefined).flatMap(box => nodesOf(box.children, 'Svg')), String(columns)).toEqual([])
+      // Each lane sits right of a label Box of fixed width that does not shrink.
+      const rows = nodesOf(drawn, 'Box').filter(box => (box.children ?? []).some(child => svgs.includes(child as Node)))
+
+      expect(rows.map(box => (box.children![0] as Node).props), String(columns)).toEqual(svgs.map(() => ({ width: label, flexShrink: 0 })))
     }
   })
 
@@ -632,6 +644,10 @@ describe('desktop: the timeline page', () => {
     const earlier = draw({ timelinePage: { turnId: 't2', back: 1 } })
 
     expect(shownSteps(earlier)).toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    // The steps off the page fold into a line each side: 10 s apart, #0–#2 take 30 s up to #3, #13–#22 95 s up to the last end.
+    expect(textOf(newest)).toContain('▸ #0–#12 · 13 步 · 2m10s')
+    expect(textOf(earlier)).toContain('▸ #0–#2 · 3 步 · 30.0s')
+    expect(textOf(earlier)).toContain('▸ #13–#22 · 10 步')
     press(buttonOf(earlier, '更新的步'))
     press(buttonOf(earlier, '更早的步'))
     expect(pages.slice(1)).toEqual([
@@ -657,6 +673,31 @@ describe('desktop: the timeline page', () => {
     expect(shownSteps(draw({ timelineTurnId: 't1' })), 'the page picked on t1').toEqual([3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
     expect(shownSteps(draw({ timelineTurnId: 't2' }))).toEqual([13, 14, 15, 16, 17, 18, 19, 20, 21, 22])
     expect(shownSteps(draw({})), 'following the latest, t2').toEqual([13, 14, 15, 16, 17, 18, 19, 20, 21, 22])
+  })
+
+  test('步骤 / 事件: the current one primary; 事件 shows the events view without the steps’ buttons; pressing the current one does nothing', () => {
+    setLang('zh-CN')
+
+    const toggled: string[] = []
+    const steps = drawDesktopPane(EL, paneOf({ page: 'timeline', timeline: TURNS, onToggleDisclosure: key => toggled.push(key) }))
+
+    expect(buttonOf(steps, '步骤')?.props).toMatchObject({ variant: 'primary' })
+    expect(buttonOf(steps, '事件')?.props).toMatchObject({ variant: 'secondary' })
+    expect(['瀑布', '热点', '上一轮'].map(label => buttonOf(steps, label) !== undefined)).toEqual([true, true, true])
+    press(buttonOf(steps, '步骤'))
+    press(buttonOf(steps, '事件'))
+
+    const read = { session: 'me', own: [{ at: NOW, name: 'guard.block', severity: 'WARN', session: 'me', attributes: { 'rule.id': 'secret', target: '.env' } }], others: [] }
+    const events = timelineBody(EL, { ...paneOf({ page: 'timeline', timeline: TURNS, disclosures: new Set(['timeline-events']), onToggleDisclosure: key => toggled.push(key) }), timelineEvents: read })
+
+    expect(buttonOf(events, '事件')?.props).toMatchObject({ variant: 'primary' })
+    expect(['瀑布', '热点', '上一轮', '下一轮', '最新'].map(label => buttonOf(events, label))).toEqual([undefined, undefined, undefined, undefined, undefined])
+    expect(textOf(events)).toContain('守卫拦截')
+    expect(textOf(events)).toContain('secret · .env')
+    expect(stepLanes(events)).toEqual([])
+    press(buttonOf(events, '事件'))
+    press(buttonOf(events, '步骤'))
+    expect(toggled).toEqual(['timeline-events', 'timeline-events'])
   })
 
   test('no turn yet: the empty line and no buttons', () => {
@@ -705,8 +746,18 @@ describe('desktop: the page tabs', () => {
   })
 })
 
-describe('desktop: the overview count card', () => {
-  test('the first card is one line of bold chips: needs you, running, unread, aborted; failed gates count in needs you', () => {
+/** The KPI tiles: per tile its label, its value and the value's color and boldness. */
+const kpiTiles = (drawn: unknown) =>
+  nodesOf(drawn, 'Box')
+    .filter(box => box.props?.borderStyle === 'round' && box.props?.flexGrow === 1)
+    .map(box => {
+      const [label, value] = kids(box)
+
+      return [textOf(label), textOf(value), value?.props?.color, value?.props?.bold]
+    })
+
+describe('desktop: the overview KPI tiles', () => {
+  test('first, four tiles: needs you, running, unread, the latest gate, each value bold in its theme key; failed gates count in needs you; aborted is in the fold line', () => {
     setLang('zh-CN')
 
     const agents = [
@@ -716,37 +767,35 @@ describe('desktop: the overview count card', () => {
       runAgent({ agentId: 'a5', state: 'aborted', ...ENDED }),
     ]
     const drawn = drawDesktopPane(EL, paneOf({ agents, snap: SNAP_ONE, gates: [GATE_FAILED] }))
-    const countRow = nodesOf(drawn, 'Box').find(box => box.props?.columnGap === 1 && box.props?.flexWrap === 'wrap' && nodesOf(box, 'Button').length === 0)
-    const chips = nodesOf(countRow, 'Text').filter(one => one.props?.bold === true)
 
-    expect(chips.map(one => [textOf(one), one.props?.color])).toEqual([
-      [' ! 需要你 2 ', 'warning'],
-      [' ● 运行 2 ', 'permission'],
-      [' 待读2 ', 'inactive'],
-      [' ⊘ 已中止 1 ', 'warning'],
+    expect(kpiTiles(drawn)).toEqual([
+      ['需要你', '2', 'warning', true],
+      ['运行', '2', 'permission', true],
+      ['待读', '2', 'text', true],
+      ['门禁', '✗ 失败', 'error', true],
     ])
+    expect(textOf(drawn)).toContain('▸ 已完成 · 3 · ✓ 已返回 1 · ⊘ 已中止 1 · ✓ 外审完成 1')
   })
 
-  test('no aborted agent and no failed gate: those two chips are left out', () => {
+  test('a zero tile is inactive and not bold; no gate yet is —; a passing one green', () => {
     setLang('zh-CN')
 
-    const drawn = drawDesktopPane(EL, paneOf({ agents: [runAgent({})] }))
-    const countRow = nodesOf(drawn, 'Box').find(box => box.props?.columnGap === 1 && box.props?.flexWrap === 'wrap' && nodesOf(box, 'Button').length === 0)
-    const text = textOf(countRow)
-
-    expect(text).toContain('● 运行 1')
-    expect(text).not.toContain('已中止')
-    expect(text).not.toContain('门禁')
+    expect(kpiTiles(drawDesktopPane(EL, paneOf({ agents: [runAgent({})] })))).toEqual([
+      ['需要你', '0', 'inactive', false],
+      ['运行', '1', 'permission', true],
+      ['待读', '0', 'inactive', false],
+      ['门禁', '—', 'inactive', false],
+    ])
+    expect(kpiTiles(drawDesktopPane(EL, paneOf({ gates: [{ ...GATE_FAILED, fail: 0 }] })))[3]).toEqual(['门禁', '✓ 通过', 'success', true])
   })
 
-  test('all zero: no count card, the idle line stays', () => {
+  test('all zero: four dim tiles, the idle line stays', () => {
     setLang('zh-CN')
 
-    const text = textOf(drawDesktopPane(EL, paneOf({})))
+    const drawn = drawDesktopPane(EL, paneOf({}))
 
-    expect(text).not.toContain('需要你 ')
-    expect(text).not.toContain('待读')
-    expect(text).toContain('没有需要你处理或运行中的任务')
+    expect(kpiTiles(drawn).map(tile => tile[2])).toEqual(['inactive', 'inactive', 'inactive', 'inactive'])
+    expect(textOf(drawn)).toContain('没有需要你处理或运行中的任务')
   })
 })
 
@@ -790,19 +839,23 @@ function lineTexts(node: unknown, isTitle = false, out: { text: string; isTitle:
 }
 
 describe('desktop: the overview items', () => {
-  test('every overview section but the counts row sits in its own bordered frame, on every tier', () => {
+  test('needs you sits in a card framed in error, every other section in its own promptBorder frame, the KPI tiles in none, on every tier', () => {
     setLang('zh-CN')
 
     for (const columns of [50, 80, 120]) {
       const drawn = drawDesktopPane(EL, paneOf({ ...BUSY, columns }))
-      const frames = nodesOf(drawn, 'Box').filter(box => box.props?.borderStyle === 'round' && box.props?.borderColor === 'promptBorder')
-      const headers = ['需要你', '运行中', '最近门禁', '工作树'].filter(title => nodesOf(drawn, 'Text').some(one => textOf(one) === title))
+      const framedIn = (color: string) => nodesOf(drawn, 'Box').filter(box => box.props?.borderStyle === 'round' && box.props?.borderColor === color && box.props?.paddingY === 1)
+      const headerOf = (title: string) => nodesOf(drawn, 'Text').map(textOf).find(text => new RegExp(`^${title} · \\d+$`).test(text)) ?? `${title}: none`
+      const holds = (frame: Node, title: string) => nodesOf(frame.children, 'Text').some(one => textOf(one) === title)
+      const headers = ['需要你', '运行中', '最近门禁', '工作树'].map(headerOf)
 
-      expect(headers.length, `${columns}: the fixture draws these sections`).toBe(4)
-      for (const title of headers) {
-        expect(frames.filter(frame => nodesOf(frame.children, 'Text').some(one => textOf(one) === title)).length, `${columns}: ${title} framed once`).toBe(1)
+      expect(headers.filter(title => title.endsWith('none')), `${columns}: the fixture draws these sections`).toEqual([])
+      expect(framedIn('error').filter(frame => holds(frame, headers[0]!)).length, `${columns}: 需要你 in its attention card`).toBe(1)
+      for (const title of headers.slice(1)) {
+        expect(framedIn('promptBorder').filter(frame => holds(frame, title)).length, `${columns}: ${title} framed once`).toBe(1)
       }
-      expect(frames.some(frame => nodesOf(frame.children, 'Text').some(one => textOf(one).includes('! 需要你'))), `${columns}: the counts row is not framed`).toBe(false)
+      expect(framedIn('promptBorder').some(frame => holds(frame, '待读')), `${columns}: the KPI tiles are not in a section frame`).toBe(false)
+      expect(kpiTiles(drawn), `${columns}: four tiles`).toHaveLength(4)
     }
   })
 
@@ -892,26 +945,41 @@ describe('desktop: the overview items', () => {
     const gates = [gateOf('bun test', { where: 'agent-gone' })]
     const needsYou = (trees: WorktreeInfo[] | null) => textOf(drawDesktopPane(EL, paneOf({ gates, trees })))
 
-    expect(needsYou([wtree('agent-a')])).not.toContain('需要你  1')
-    expect(needsYou(null)).toContain('需要你  1')
-    expect(needsYou([wtree('agent-gone')])).toContain('需要你  1')
-    expect(textOf(drawDesktopPane(EL, paneOf({ gates: [gateOf('bun test')], trees: [] }))), 'the main tree is always there').toContain('需要你  1')
+    expect(needsYou([wtree('agent-a')])).not.toContain('需要你 · 1')
+    expect(needsYou(null)).toContain('需要你 · 1')
+    expect(needsYou([wtree('agent-gone')])).toContain('需要你 · 1')
+    expect(textOf(drawDesktopPane(EL, paneOf({ gates: [gateOf('bun test')], trees: [] }))), 'the main tree is always there').toContain('需要你 · 1')
   })
 
   test('ages drop their seconds past a minute', () => {
     setLang('zh-CN')
 
     const gates = [gateOf('bun test a', { at: NOW - 7_510_000 }), gateOf('bun test b', { at: NOW - 1_653_000 }), gateOf('bun test c', { at: NOW - 33_000 })]
-    const text = textOf(withClocks(drawDesktopPane(EL, paneOf({ gates }))))
+    // Standard width: one column of sections, so the gate rows have room for their counts.
+    const text = textOf(withClocks(drawDesktopPane(EL, paneOf({ gates, columns: 60 }))))
 
+    // Under 30 minutes a gate needs you, its age in its 位置 row; every one shows its age in 最近门禁.
     expect(text).toContain('主树 · 2 fail · 33s前')
     expect(text).toContain('主树 · 2 fail · 27m前')
-    expect(text).toContain('主树 · 2 fail · 2h05m前')
+    expect(text).toContain('2 fail2h05m前bun test a · 主树')
     expect(text).not.toContain('27m33s')
   })
 })
 
-describe('desktop: the Agents page is one card per agent', () => {
+/** An Agents or overview list row: its title row opens with the fixed-width glyph column. */
+const listRows = (drawn: unknown) => nodesOf(drawn, 'Box').filter(box => kids(kids(box)[0] ?? {})[0]?.props?.width === 2)
+
+/** The bold task titles of the rows, the KPI tiles' numbers aside. */
+const rowTitles = (drawn: unknown) =>
+  nodesOf(drawn, 'Text')
+    .filter(one => one.props?.wrap === 'truncate-end' && one.props?.bold === true && one.props?.color === 'text')
+    .map(textOf)
+    .filter(text => !/^\d+$/.test(text))
+
+/** The Agents page's frames, past its four KPI tiles. */
+const agentCardsOf = (drawn: unknown) => roundCards(drawn).slice(4)
+
+describe('desktop: the Agents page is a row per agent', () => {
   const AGENTS = [
     runAgent({ agentId: 'a1' }),
     runAgent({ agentId: 'a2', state: 'error', denied: 2, ...ENDED }),
@@ -919,16 +987,18 @@ describe('desktop: the Agents page is one card per agent', () => {
     runAgent({ agentId: 'a4', state: 'aborted', startedAt: NOW - 2_400_000, endedAt: NOW - 5_000, durationMs: 2_395_000 }),
   ]
 
-  test('one card per agent; per agent a status, the title, a bar on one shared scale and the time; 阅读 on ended rows', () => {
+  test('a 进行中 card and an 已结束 card, a row per agent: a glyph, the title, a bar on one shared scale and the time; 阅读 on ended rows', () => {
     setLang('zh-CN')
 
     const read: string[] = []
     const drawn = drawDesktopPane(EL, paneOf({ page: 'agents', agents: AGENTS, onReadAgent: id => read.push(id) }))
-    const cards = roundCards(drawn)
+    const cards = agentCardsOf(drawn)
     const svgs = nodesOf(drawn, 'Svg')
     const scales = svgs.map(svg => String(svg.props?.alt).replace(/^.*共同刻度\s*/, '共同刻度 '))
 
-    expect(cards, 'one card per agent').toHaveLength(4)
+    expect(roundCards(drawn).slice(0, 4).map(textOf), 'the KPI tiles first').toEqual(['运行1', '已返回1', '待验收1', '中止1'])
+    expect(cards.map(card => textOf(kids(card)[0])), 'running first, then the ended').toEqual(['进行中 · 1共同刻度 0—60 min', '已结束 · 3'])
+    expect(listRows(drawn), 'one row per agent').toHaveLength(4)
     expect(svgs).toHaveLength(4)
     expect(scales).toEqual(['共同刻度 0—60 min', '共同刻度 0—60 min', '共同刻度 0—60 min', '共同刻度 0—60 min'])
     expect(svgs.every(svg => svg.props?.isInteractive === undefined)).toBe(true)
@@ -947,38 +1017,75 @@ describe('desktop: the Agents page is one card per agent', () => {
     setLang('zh-CN')
 
     const drawn = drawDesktopPane(EL, paneOf({ page: 'agents', agents: AGENTS }))
-    const titles = nodesOf(drawn, 'Text').filter(one => one.props?.wrap === 'wrap' && one.props?.bold === true)
 
-    expect(titles.map(textOf)).toContain('Write the docs')
+    expect(rowTitles(drawn)).toContain('Write the docs')
     const metas = nodesOf(drawn, 'Text').filter(one => one.props?.color === 'subtle').map(textOf)
     expect(metas.some(one => /opus-5-5 · \d+ tools$/.test(one))).toBe(true)
     expect(nodesOf(drawn, 'Text').find(one => textOf(one) === '✗ 被拒2')?.props).toMatchObject({ color: 'error', bold: true })
   })
 
-  test('narrow: duration bar uses narrow width', () => {
+  test('every bar spans its row, columns × 9.5 px kept within 120–720; narrow adds a dot per agent above the rows', () => {
     setLang('zh-CN')
 
-    const svgWidth = (columns: number) =>
-      nodesOf(drawDesktopPane(EL, paneOf({ page: 'agents', agents: AGENTS, columns })), 'Svg').map(svg => svg.props?.width)
+    const drawnAt = (columns: number) => drawDesktopPane(EL, paneOf({ page: 'agents', agents: AGENTS, columns }))
+    const barWidths = (columns: number) => nodesOf(drawnAt(columns), 'Svg').filter(svg => String(svg.props?.alt).includes('共同刻度')).map(svg => svg.props?.width)
 
-    expect(svgWidth(60)).toEqual([360, 360, 360, 360])
-    expect(svgWidth(40)).toEqual([224, 224, 224, 224])
+    expect(barWidths(60)).toEqual([504, 504, 504, 504])
+    expect(barWidths(40)).toEqual([314, 314, 314, 314])
+    expect(barWidths(120)).toEqual([720, 720, 720, 720])
+    expect(nodesOf(drawnAt(60), 'Svg').map(svg => svg.props?.alt), 'no dots at standard width').not.toContain('1 个运行，3 个已结束')
+
+    const narrow = drawnAt(40)
+    const dots = nodesOf(narrow, 'Svg').find(svg => svg.props?.alt === '1 个运行，3 个已结束')
+
+    expect(dots?.props?.source, 'the running one first, larger, in its ring').toMatch(/^<svg[^>]*><circle cx="8" cy="8" r="6"/)
+    expect(textOf(agentCardsOf(narrow)[0])).toContain('1 运行 · 3 完成')
   })
 
-  test('ended and read before this visit fold into one ✓N 已完成 button; failures stay; open, the folded rows come back', () => {
+  test('the dots count as ended neither the running nor the idle', () => {
+    setLang('zh-CN')
+
+    const agents = [
+      runAgent({ agentId: 'a1' }),
+      runAgent({ agentId: 'a2', state: 'idle' }),
+      runAgent({ agentId: 'a3', state: 'idle' }),
+      runAgent({ agentId: 'a4', state: 'done', ...ENDED }),
+    ]
+    const narrow = drawDesktopPane(EL, paneOf({ page: 'agents', agents, columns: 40 }))
+
+    expect(nodesOf(narrow, 'Svg').map(svg => svg.props?.alt)).toContain('1 个运行，1 个已结束')
+    expect(textOf(agentCardsOf(narrow)[0])).toContain('1 运行 · 1 完成')
+  })
+
+  test('the dots past what fits are +N', () => {
+    setLang('zh-CN')
+
+    const many = Array.from({ length: 30 }, (_, n) => runAgent({ agentId: `m${n}`, state: 'done', ...ENDED }))
+    const drawn = drawDesktopPane(EL, paneOf({ page: 'agents', agents: many, columns: 40 }))
+    const dots = nodesOf(drawn, 'Svg').find(svg => String(svg.props?.alt).includes('个已结束'))
+    const shown = (String(dots?.props?.source).match(/<circle/g) ?? []).length
+
+    expect(shown).toBeGreaterThan(0)
+    expect(textOf(agentCardsOf(drawn)[0])).toContain(`+${30 - shown}`)
+  })
+
+  test('ended and read before this visit fold into one ▸ 已完成 · N button; failures stay; open, the folded rows come back', () => {
     setLang('zh-CN')
 
     let toggles = 0
     const data = { page: 'agents' as const, agents: AGENTS, agentsSeenBefore: NOW, onToggleFold: () => (toggles += 1) }
     const closed = drawDesktopPane(EL, paneOf(data))
-    const titles = (drawn: unknown) => nodesOf(drawn, 'Text').filter(one => one.props?.wrap === 'wrap' && one.props?.bold === true).map(textOf)
 
-    expect(titles(closed)).toEqual(['Build mm plugin', 'Build mm plugin'])
-    expect(buttonOf(closed, '✓1 已完成 · ⊘1 已中止')?.props).toMatchObject({ variant: 'secondary' })
-    expect(buttonOf(closed, '✓1 已完成 · ⊘1 已中止')?.props?.hotkey).toBeUndefined()
-    press(buttonOf(closed, '✓1 已完成 · ⊘1 已中止'))
+    expect(rowTitles(closed)).toEqual(['Build mm plugin', 'Build mm plugin'])
+    expect(buttonOf(closed, '▸ 已完成 · 2 · ⊘1 已中止')?.props).toMatchObject({ key: 'agents-fold', variant: 'secondary' })
+    expect(buttonOf(closed, '▸ 已完成 · 2 · ⊘1 已中止')?.props?.hotkey).toBeUndefined()
+    press(buttonOf(closed, '▸ 已完成 · 2 · ⊘1 已中止'))
     expect(toggles).toBe(1)
-    expect(titles(drawDesktopPane(EL, paneOf({ ...data, isFoldOpen: true }))).some(one => one.startsWith('Write the docs'))).toBe(true)
+
+    const open = drawDesktopPane(EL, paneOf({ ...data, isFoldOpen: true }))
+
+    expect(rowTitles(open).some(one => one.startsWith('Write the docs'))).toBe(true)
+    expect(buttonOf(open, '▾ 已完成 · 2 · ⊘1 已中止')).toBeDefined()
     expect(nodesOf(closed, 'Svg'), 'the folded rows draw no bar').toHaveLength(2)
   })
 
@@ -1014,21 +1121,30 @@ describe('desktop: the Agents page is one card per agent', () => {
     expect(textOf(drawDesktopPane(EL, paneOf({ page: 'agents', agents, detail: { page: 'agents', agentId: 'a3' }, peek })))).toContain('in 182k · 缓存读 91% · out 9.4k')
   })
 
-  test('status row never shares a row with a narrow column: status is its own vertical row under task', () => {
+  test('each row: a fixed-width glyph, the title that gives way, its time and Button right; the state word and metadata under it, then its bar', () => {
     setLang('zh-CN')
 
     const drawn = drawDesktopPane(EL, paneOf({ page: 'agents', agents: AGENTS }))
-    const cards = roundCards(drawn)
+    const rows = listRows(drawn)
 
-    expect(cards).toHaveLength(4)
-    for (const c of cards) {
-      const children = kids(c)
-      expect(children[0]?.type).toBe('Text')
-      expect(children[1]?.type).toBe('Box')
-      expect(children[1]?.props?.flexDirection).toBe('row')
-      const statusText = textOf(children[1])
-      expect(/运行|已返回|已中止|出错/.test(statusText)).toBe(true)
+    expect(rows).toHaveLength(4)
+    expect(rows.map(row => textOf(kids(kids(row)[0]!)[0]))).toEqual(['●', '⊘', '✓', '✗'])
+
+    for (const row of rows) {
+      const [head, under] = kids(row)
+      const [, title, right] = kids(head!)
+
+      expect(title?.props).toMatchObject({ flexGrow: 1, minWidth: 0 })
+      expect(nodesOf(right, 'Button')).toHaveLength(1)
+      expect(textOf(right)).toMatch(/^\d+m\d{2}s$/)
+      expect(nodesOf(under, 'Svg')).toHaveLength(1)
     }
+
+    expect(rows.slice(1).map(row => nodesOf(kids(row)[1], 'Text').filter(one => one.props?.bold === true).map(one => [textOf(one), one.props?.color]))).toEqual([
+      [['已中止', 'warning']],
+      [['已返回 · 未验收', 'success']],
+      [['出错', 'error'], ['✗ 被拒2', 'error']],
+    ])
   })
 
   test('the copy disclosure reveals quoted text for worktrees and resume', () => {
@@ -1121,6 +1237,21 @@ describe('desktop: the Agents page is one card per agent', () => {
     const mmrunCaptions = nodesOf(mmrunPage, 'Text').filter(t => textOf(t).includes('共同刻度'))
     expect(mmrunCaptions).toHaveLength(1)
     expect(textOf(mmrunCaptions[0])).toContain('共同刻度')
+  })
+
+  test('a model row’s bar stays within the room its card leaves after the name, status, time and token cells', () => {
+    // 47 and 48: standard widths whose room is under 60 px.
+    for (const columns of [47, 48, 50, 64, 80, 120]) {
+      const drawn = drawDesktopPane(EL, paneOf({ page: 'mmrun', snap: SNAP_ONE, columns }))
+      const room = Math.round((columns - FRAME_CELLS - 8 - 10 - 7 - 9 - 4) * PIXELS_PER_COLUMN)
+      const bars = nodesOf(drawn, 'Svg').filter(svg => svg.props?.height === 4 || svg.props?.height === 8)
+
+      expect(bars.length, `${columns} columns draw bars`).toBeGreaterThan(0)
+
+      for (const one of bars) {
+        expect(Number(one.props?.width), `${columns} columns`).toBeLessThanOrEqual(room)
+      }
+    }
   })
 })
 

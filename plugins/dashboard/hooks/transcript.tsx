@@ -4,7 +4,9 @@ import type { ElementTable, EngineInterface, HookFailure, On } from 'claude-code
 import type { AgentRun, MmRun, MmSnapshot } from '../types'
 import { fmtDuration } from './agent-model'
 import { card, chip, MODEL_GLYPHS, modelTone } from './desktop'
-import { BAR, elapsedBar, scaleOf, TONE_KEYS } from './desktop-svg'
+import { attention, iconOf, kv } from './desktop/kit'
+import type { El } from './desktop/kit'
+import { BAR, elapsedBar, scaleOf, stackedBar, TONE_KEYS } from './desktop-svg'
 import type { Tone } from './desktop-svg'
 import { failureLine } from './failures'
 import { t } from './i18n'
@@ -39,9 +41,14 @@ const MM_COMMANDS = ['mm:review', 'mm:run']
 
 // The opening words of each guard's deny text; the sentence after the one the marker opens is the legal next step.
 const GUARDS = [
-  { marker: 'Blocked on the shared main worktree: `', title: () => t().guardGit, blocked: (op: string) => t().guardGitBlocked(op) },
-  { marker: 'mm: *.raw is the full event stream', title: () => t().guardRaw, blocked: () => t().guardRawBlocked },
+  { marker: 'Blocked on the shared main worktree: `', title: () => t().guardGit, blocked: (op: string) => t().guardGitBlocked(op), source: 'harness · guard-shared-tree-git.py' },
+  { marker: 'mm: *.raw is the full event stream', title: () => t().guardRaw, blocked: () => t().guardRawBlocked, source: 'mm · guard.py' },
 ]
+
+const ICON_PX = 14
+const TEST_BAR = { width: 120, height: 6 } as const
+// Wide enough for `What to do` beside the kv rows of a guard card.
+const GUARD_LABEL_COLUMNS = 9
 
 type AgentInput = { description?: unknown; prompt?: unknown; subagent_type?: unknown; run_in_background?: unknown; isolation?: unknown; model?: unknown }
 type AgentOutput = {
@@ -156,15 +163,25 @@ function desktopTestCard(el: ElementTable, summary: TestSummary, build: XcodeSum
   const what = summary.unit === 'packages' ? t().packagesUnit : t().testsUnit
   const lines = failureLines(summary, build, isFailed)
   const markers = build?.markers ?? []
+  const Svg = 'Svg' in el ? el.Svg : undefined
+  const { pass, fail } = summary
 
   return [
-    <Box columnGap={1} flexWrap="wrap">
+    <Box columnGap={1} flexWrap="wrap" alignItems="center">
       <Text color={TONE_KEYS[isFailed ? 'failed' : 'done']} bold>
         {isFailed ? t().testsFailed(what) : t().testsPassed(what)}
       </Text>
       <Text color="text" bold>{`${summary.pass ?? '—'} pass`}</Text>
       <Text color={(summary.fail ?? 0) > 0 ? TONE_KEYS.failed : 'text'}>{`${summary.fail ?? '—'} fail`}</Text>
       {markers.length === 0 ? null : <Text color="subtle">{markers.join(' · ')}</Text>}
+      {Svg === undefined || pass === null || fail === null || pass + fail === 0 ? null : (
+        <Svg
+          source={stackedBar([{ value: pass, tone: 'done' }, { value: fail, tone: 'failed' }], TEST_BAR.width, TEST_BAR.height)}
+          alt={`${pass} pass · ${fail} fail`}
+          width={TEST_BAR.width}
+          height={TEST_BAR.height}
+        />
+      )}
     </Box>,
     lines.length === 0 ? null : <Code source={leaf(lines.slice(0, MAX_FAILURES).join('\n'))} />,
   ]
@@ -208,6 +225,31 @@ function callState(tone: Tone, isDispatched: boolean, isInterrupted: boolean): {
   return tone === 'done' ? { text: `✓ ${t().returned}`, color: TONE_KEYS.done } : { text: `✗ ${t().agentStates.error}`, color: TONE_KEYS.failed }
 }
 
+/** The right end of a desktop tool row: time, tool count and lines changed, as many as the output carries. */
+function toolMeta(el: El, out: AgentOutput | null) {
+  const { Box, Text } = el
+  const duration = out?.totalDurationMs
+  const tools = out?.totalToolUseCount
+  const added = out?.toolStats?.linesAdded
+  const removed = out?.toolStats?.linesRemoved
+  const parts = [typeof duration === 'number' ? fmtDuration(duration) : '', typeof tools === 'number' ? `${tools} tools` : ''].filter(part => part !== '')
+  const lines = [
+    typeof added === 'number' ? <Text color={TONE_KEYS.done}>{`+${added}`}</Text> : null,
+    typeof removed === 'number' ? <Text color={TONE_KEYS.failed}>{`−${removed}`}</Text> : null,
+  ].filter(line => line !== null)
+  if (parts.length === 0 && lines.length === 0) return null
+
+  return (
+    <Box flexShrink={0}>
+      <Text color="subtle">
+        {parts.join(' · ')}
+        {parts.length > 0 && lines.length > 0 ? ' · ' : ''}
+        {lines.flatMap((line, i) => (i === 0 ? [line] : [' ', line]))}
+      </Text>
+    </Box>
+  )
+}
+
 /** A hook's `.catch`: its failure to the debug log, once per hook this load. Declared per file: validate follows $ into this file's functions only. */
 function hookFailed($: EngineInterface, name: string, error: HookFailure): void {
   const line = failureLine(name, error)
@@ -239,6 +281,7 @@ export function registerTranscript(on: On): void {
     const onTask = () => update($, { ...expandedTask, id }, v => v !== true)
 
     if (e.surface === 'desktop') {
+      const el = $.ui.resolve(e) as El
       const state = callState(tone, isDispatched, e.props.isInterrupted)
       const meta = [
         input.run_in_background === true ? t().background : '',
@@ -248,7 +291,13 @@ export function registerTranscript(on: On): void {
 
       return (
         <Box flexDirection="column" gap={1}>
-          <Text bold wrap="wrap">{`${kind} · ${input.description}`}</Text>
+          <Box flexDirection="row" columnGap={1} alignItems="center">
+            {iconOf(el, 'agent', 'idle', 'Agent', ICON_PX)}
+            <Box flexGrow={1} flexShrink={1} minWidth={0}>
+              <Text bold wrap="wrap">{`${kind} · ${input.description}`}</Text>
+            </Box>
+            {toolMeta(el, asObject<AgentOutput>(e.props.output))}
+          </Box>
           <Box columnGap={1} flexWrap="wrap">
             <Text color={state.color}>{state.text}</Text>
             {meta.length === 0 ? null : <Text color="subtle">{meta.join(' · ')}</Text>}
@@ -389,13 +438,24 @@ export function registerTranscript(on: On): void {
       status = <Text dimColor>{t().waitingStatus}</Text>
     }
 
+    const head = (
+      <Text wrap="truncate">
+        <Text bold>{`mmrun ${sub}`}</Text>
+        {points.length === 0 ? null : <Text>{`  ${points.join(' · ')}`}</Text>}
+        {isWaiting ? <Text dimColor>{`  ${t().waitingInBackground}`}</Text> : null}
+      </Text>
+    )
+
     return (
       <Box flexDirection="column">
-        <Text wrap="truncate">
-          <Text bold>{`mmrun ${sub}`}</Text>
-          {points.length === 0 ? null : <Text>{`  ${points.join(' · ')}`}</Text>}
-          {isWaiting ? <Text dimColor>{`  ${t().waitingInBackground}`}</Text> : null}
-        </Text>
+        {e.surface === 'desktop' ? (
+          <Box flexDirection="row" columnGap={1} alignItems="center">
+            {iconOf($.ui.resolve(e) as El, 'terminal', 'idle', 'Bash', ICON_PX)}
+            {head}
+          </Box>
+        ) : (
+          head
+        )}
         {status}
         {await next(e)}
       </Box>
@@ -439,20 +499,51 @@ export function registerTranscript(on: On): void {
     const { Box, Button, Markdown, Text } = $.ui.resolve(e)
 
     if (e.surface === 'desktop') {
+      const el = $.ui.resolve(e) as El
       const id = e.props.tool_use_id
       const isOpen = (await read($, { ...expandedTests, id })) === true
       // The command runs from the backtick that ends the marker to the next one.
       const op = guard.marker.endsWith('`') ? (from.slice(guard.marker.length).split('`')[0] ?? '') : ''
       const cut = from.indexOf('. ')
+      const reason = (cut < 0 ? from : from.slice(0, cut)).trim()
       const explanation = cut < 0 ? '' : from.slice(cut + 2).trim()
 
       return (
         <Box flexDirection="column" gap={1}>
-          <Text color={TONE_KEYS.failed} bold wrap="wrap">
-            {guard.blocked(op)}
-          </Text>
-          {explanation === '' ? null : <Text bold>{t().allowedNextStep}</Text>}
-          {explanation === '' ? null : explanation.includes('\n\n') ? <Markdown text={leaf(explanation)} /> : <Text wrap="wrap">{leaf(explanation)}</Text>}
+          {attention(el, 'error', [
+            <Box flexDirection="row" columnGap={1} alignItems="center">
+              {iconOf(el, 'shield', 'failed', guard.title(), ICON_PX)}
+              <Text color={TONE_KEYS.failed} bold wrap="wrap">
+                {guard.blocked(op)}
+              </Text>
+            </Box>,
+            op === '' ? null : kv(el, t().command, op, GUARD_LABEL_COLUMNS),
+            kv(
+              el,
+              t().guardReason,
+              <Text bold wrap="wrap">
+                {leaf(reason)}
+              </Text>,
+              GUARD_LABEL_COLUMNS,
+            ),
+            explanation === ''
+              ? null
+              : kv(
+                  el,
+                  t().guardNext,
+                  explanation.includes('\n\n') ? (
+                    <Markdown text={leaf(explanation)} />
+                  ) : (
+                    <Text bold wrap="wrap">
+                      {leaf(explanation)}
+                    </Text>
+                  ),
+                  GUARD_LABEL_COLUMNS,
+                ),
+            <Text dimColor italic>
+              {guard.source}
+            </Text>,
+          ])}
           <Button key="raw" label={isOpen ? t().hideRawResult : t().showRawResult} variant="secondary" onPress={() => update($, { ...expandedTests, id }, v => v !== true)} />
           {isOpen ? await next(e) : null}
         </Box>

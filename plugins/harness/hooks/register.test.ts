@@ -2,6 +2,8 @@ import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { register } from './index'
+
 const ROOT = '/proj'
 const HOME = '/home'
 const ENGINE = { plugin: 'engine', tier: 'core' } as const
@@ -142,6 +144,85 @@ describe('agent.offer', () => {
     expect(logs[0]?.to).toBe('debug')
     expect(logs[0]?.text).toContain('harness: agent.offer')
     expect(logs[0]?.text).toContain('env unreadable')
+  })
+})
+
+const mentionInput = (mention: string, path: string) => ({ mention, path })
+
+// Stands in for the engine beneath a mention: every path stats and lands where `links` sends it; `env` without HOME = HOME unset.
+const mentionWorld = (on: On, links: Record<string, string> = {}, env: Record<string, string> = { HOME }) => {
+  mock.env(on, env)
+  on('fs.stat', ($, e) => ({ value: { kind: 'file', size: 1, mtimeMs: 0, isLink: e.path in links, realPath: links[e.path] ?? e.path } }))
+  on('prompt.mention', () => ({ type: 'file' }))
+}
+
+describe('prompt.mention', () => {
+  for (const [mention, path] of <[string, string][]>[
+    ['~/.claude/settings.json', `${HOME}/.claude/settings.json`],
+    ['~/.claude.json', `${HOME}/.claude.json`],
+    ['deploy/ov.conf', `${ROOT}/deploy/ov.conf`],
+    ['/etc/openviking/ov.conf', '/etc/openviking/ov.conf'],
+    ['~/.Codex/auth.json', `${HOME}/.Codex/auth.json`],
+    ['deploy/OV.conf', `${ROOT}/deploy/OV.conf`],
+  ]) {
+    test(`denies @${mention}`, async ($, on) => {
+      mentionWorld(on)
+      const got = await $.prompt.mention(mentionInput(mention, path))
+      expect(got.deny).toContain(mention)
+      expect(got.type).toBeUndefined()
+    })
+  }
+
+  test('denies a link to a secret file', async ($, on) => {
+    mentionWorld(on, { '/tmp/n.json': `${HOME}/.codex/auth.json` })
+    const got = await $.prompt.mention(mentionInput('/tmp/n.json', '/tmp/n.json'))
+    expect(got.deny).toContain('/tmp/n.json')
+    expect(got.type).toBeUndefined()
+  })
+
+  test('denies a secret file under the real HOME when HOME is a link', async ($, on) => {
+    mentionWorld(on, { [HOME]: '/private/home', '/tmp/n.json': '/private/home/.codex/auth.json' })
+    const got = await $.prompt.mention(mentionInput('/tmp/n.json', '/tmp/n.json'))
+    expect(got.deny).toContain('/tmp/n.json')
+    expect(got.type).toBeUndefined()
+  })
+
+  test('denies a file whose real path the stat does not give', async ($, on) => {
+    mock.env(on, { HOME })
+    on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: 0, isLink: true } }))
+    on('prompt.mention', () => ({ type: 'file' }))
+    const got = await $.prompt.mention(mentionInput('/tmp/n.json', '/tmp/n.json'))
+    expect(got.deny).toContain('/tmp/n.json')
+    expect(got.type).toBeUndefined()
+  })
+
+  test('denies every mention when HOME is unset', async ($, on) => {
+    mentionWorld(on, {}, {})
+    const got = await $.prompt.mention(mentionInput('README.md', `${ROOT}/README.md`))
+    expect(got.deny).toContain('README.md')
+    expect(got.type).toBeUndefined()
+  })
+
+  test('reads @README.md', async ($, on) => {
+    mentionWorld(on)
+    const got = await $.prompt.mention(mentionInput('README.md', `${ROOT}/README.md`))
+    expect(got.deny).toBeUndefined()
+    expect(got.type).toBe('file')
+  })
+
+  test('a hook that throws logs one debug line and denies the mention', async ($, on) => {
+    const logs: { text: string; to: string }[] = []
+    on('env.get', () => ({ deny: 'env unreadable' }))
+    on('prompt.mention', () => ({ type: 'file' }))
+    on('ui.log', ($, e) => {
+      logs.push({ text: e.text, to: e.to })
+      return { value: undefined }
+    })
+    const got = await $.prompt.mention(mentionInput('README.md', `${ROOT}/README.md`))
+    expect(got.deny).toContain('harness: the secret-file check failed')
+    expect(logs.length).toBe(1)
+    expect(logs[0]?.to).toBe('debug')
+    expect(logs[0]?.text).toContain('harness: prompt.mention')
   })
 })
 
@@ -460,5 +541,30 @@ describe('idle compaction', () => {
     await clock.advance(2 * 60 * MINUTE)
     expect(seen.compacts).toBe(0)
     expect(seen.tails).toEqual([])
+  })
+})
+
+type Seen = { pattern: string; matcher?: { tool?: unknown } }
+
+const matchesBash = (leaf: unknown): boolean => leaf === 'Bash' || (leaf instanceof RegExp && leaf.test('Bash')) || (Array.isArray(leaf) && leaf.some(matchesBash))
+/** A registration a Bash call would reach on tool.call: no matcher on `tool`, or one Bash satisfies. */
+const reachesBash = (one: Seen) =>
+  ['tool.call', 'tool.*', '*'].includes(one.pattern) && (one.matcher === undefined || !('tool' in one.matcher) || matchesBash(one.matcher.tool))
+
+describe('registration', () => {
+  test('no hook stands on tool.call where a Bash call would reach it; the guards are on classic.PreToolUse (claude-code#92533)', () => {
+    const seen: Seen[] = []
+    const record = ((pattern: string, matcher: unknown) => {
+      seen.push({ pattern, ...(typeof matcher === 'object' && matcher !== null && { matcher: matcher as Seen['matcher'] }) })
+      return { catch: () => undefined }
+    }) as unknown as On
+    register(record, { blockedSubagentModels: '', sharedTreeGitGuard: true, idleCompact: true, language: 'auto' })
+    expect(seen.filter(reachesBash)).toEqual([])
+    expect([{ pattern: 'tool.call' }, { pattern: '*' }, { pattern: 'tool.call', matcher: { tool: /^B/ } }, { pattern: 'tool.call', matcher: { tool: ['Skill', 'Bash'] } }].every(reachesBash), 'the check itself').toBe(true)
+    expect(reachesBash({ pattern: 'tool.call', matcher: { tool: /^mcp__(?:dashboard|progress)__progress_plan$/ } })).toBe(false)
+    const guards = seen.filter(one => one.pattern === 'classic.PreToolUse')
+    expect(guards).toHaveLength(1)
+    const tool = guards[0]?.matcher?.tool as RegExp
+    expect(['Bash', 'Read', 'Edit', 'Write', 'Grep', 'Glob', 'BashOutput', 'mcp__x__Read'].filter(name => tool.test(name))).toEqual(['Bash', 'Read', 'Edit', 'Write', 'Grep'])
   })
 })
