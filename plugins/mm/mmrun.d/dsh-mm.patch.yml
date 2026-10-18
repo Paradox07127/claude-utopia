@@ -1,0 +1,10 @@
+# mmrun's layer for dsh headless (dsh headless --patch …): headless ignores the keys the GUI saved; these rows restore them
+- id: credentials
+  disabled: false
+- id: authorization
+  disabled: false
+# deepseek-flash is DeepSeek-V4.1-Flash (1017); MMRUN_DSH_MODEL carries --deepseek-model
+- id: agent-default-model
+  config:
+    provider: deepseek-official
+    model: !!js process.env.MMRUN_DSH_MODEL || 'deepseek-flash'

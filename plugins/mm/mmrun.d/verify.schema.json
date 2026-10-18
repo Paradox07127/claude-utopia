@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdicts", "summary"],
+  "properties": {
+    "verdicts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "verdict", "severity", "evidence"],
+        "properties": {
+          "id": { "type": "string", "description": "The claim's number, e.g. F1." },
+          "verdict": { "type": "string", "enum": ["confirmed", "plausible", "refuted"], "description": "confirmed: you traced the failure path in the code; plausible: the code allows it but you could not trace it all the way; refuted: the code shows it cannot happen." },
+          "severity": { "type": "string", "enum": ["critical", "major", "minor", "optional"] },
+          "evidence": { "type": "string", "description": "file:line and the code you read or what you ran, one or two sentences." }
+        }
+      }
+    },
+    "summary": { "type": "string" }
+  }
+}

@@ -3,7 +3,7 @@
 # Do not pass -s/--sandbox on the command line either — it overrides the path denies of default_permissions.
 default_permissions = "mm_ro"
 
-# Shell commands cannot read other models' output, Claude transcripts or the grok/agy state dirs, so cross-review isn't biased.
+# Shell commands cannot read other models' output, Claude transcripts or the grok/agy/dsh state dirs, so cross-review isn't biased.
 # MCP servers and plugins are not covered here: codex does not sandbox them, so mmrun turns them off with -c on every run.
 # ⛔ This profile definition must live in the same config layer as default_permissions: putting it in the base config.toml
 #    makes codex without -p (desktop app / bare CLI) fail at startup.
@@ -14,4 +14,5 @@ default_permissions = "mm_ro"
 "@HOME@/.claude/projects" = "deny"
 "@HOME@/.grok" = "deny"
 "@HOME@/.gemini" = "deny"
+"@HOME@/.dsh" = "deny"
 "/private/tmp/claude-@UID@" = "deny"

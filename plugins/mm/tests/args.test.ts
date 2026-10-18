@@ -225,6 +225,20 @@ describe('doneMessage', () => {
     expect(text).not.toContain('No critical or major findings')
   })
 
+  test('a review whose verification was skipped or failed: its section gives the reason', () => {
+    for (const [status, reason] of [
+      ['SKIP', 'fewer than 2 models finished'],
+      ['FAIL', 'every verifier failed: grok FAIL:1'],
+    ] as const) {
+      const text = doneMessage('review', RID, [
+        { model: 'codex', status: 'DONE', output: 'verdict: approve' },
+        { model: 'verify', status, output: '', reason },
+      ])
+
+      expect(text).toContain(`## verify(${status})\nNo result: ${reason}`)
+    }
+  })
+
   test('an ask run: its own head, each answer, no judge rules or run steps', () => {
     const text = doneMessage('ask', RID, ended)
 

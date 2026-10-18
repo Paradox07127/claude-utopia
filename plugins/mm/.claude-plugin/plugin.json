@@ -1,6 +1,6 @@
 {
   "name": "mm",
-  "version": "0.4.22",
+  "version": "0.4.26",
   "description": "Cross-model review and delegation: /mm:review and /mm:run, built on mmrun",
   "author": { "name": "Paradox07127" },
   "types": "./types/index.d.ts",
@@ -9,7 +9,7 @@
       "type": "string",
       "default": "codex,grok",
       "title": "Review models",
-      "description": "External models /mm:review uses when --models is not given, comma-separated (codex, grok, agy)."
+      "description": "External models /mm:review uses when --models is not given, comma-separated (codex, grok, agy, deepseek)."
     }
   }
 }

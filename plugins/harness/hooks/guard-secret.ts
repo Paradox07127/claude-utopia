@@ -20,7 +20,26 @@ const MENTION = new RegExp(
     String.raw`|(?<![\p{L}\p{N}_.\-])(?:ovcli|ov)\.conf(?![\p{L}\p{N}_.\-])`,
   'iu',
 )
-const SPLIT = /&&|\|\||\$\(|[;&|()\n`]/
+const SPLIT = /&&|\|\||\$\(|[;&|()\n`]/y
+// Options whose value is the next word (rg --help, man grep); rg -r is --replace, grep -r is --recursive
+const VALUE_OPTIONS = {
+  rg: {
+    short: 'ABCdEefgjMmrTt',
+    long: [
+      '--after-context', '--before-context', '--context', '--max-depth', '--encoding', '--regexp', '--file', '--glob', '--threads', '--max-columns',
+      '--max-count', '--replace', '--type-not', '--type', '--pre', '--pre-glob', '--dfa-size-limit', '--engine', '--regex-size-limit', '--iglob',
+      '--ignore-file', '--max-filesize', '--type-add', '--type-clear', '--color', '--colors', '--context-separator', '--field-context-separator',
+      '--field-match-separator', '--hostname-bin', '--hyperlink-format', '--path-separator', '--sort', '--sortr', '--generate',
+    ],
+  },
+  grep: {
+    short: 'ABCDdefm',
+    long: [
+      '--after-context', '--before-context', '--context', '--devices', '--directories', '--regexp', '--file', '--max-count', '--exclude', '--exclude-dir',
+      '--include', '--include-dir', '--label', '--binary-files',
+    ],
+  },
+}
 const HEREDOC = /<<-?\s*(['"]?)([\p{L}\p{N}_]+)\1([^\n]*)\n(.*?)\n\s*\2\s*(?=\n|$)/gsu
 const SHELL_FED = /^(?:(?:ba|z|da|k)?sh|python[\p{Nd}.]*|node|ruby|perl|osascript)$/u
 const SHELLS = /^(?:ba|z|da|k)?sh$/
@@ -218,13 +237,100 @@ function allowed(words: string[]): boolean {
     const short = new RegExp(`^-[A-Za-z]*[${quiet}][A-Za-z]*$`)
     return words.slice(1).some(a => QUIET_LONG.includes(a) || short.test(a))
   }
-  return name === 'git' && words[1] === 'commit'
+  if (name !== 'git' || words[1] !== 'commit') return false
+  // -F reads the message from a file, so its path is checked like any other
+  return !words.some((a, i) => i > 1 && !MESSAGE_FLAGS.includes(words[i - 1] ?? '') && (a === '--file' || a.startsWith('--file=') || a.startsWith('-F')))
+}
+
+/** The words of an rg or grep call past options and their values, and whether -e or -f gave the pattern. */
+function operands(name: string, words: string[]): { operands: string[]; patternGiven: boolean } {
+  const table = name === 'rg' ? VALUE_OPTIONS.rg : VALUE_OPTIONS.grep
+  let patternGiven = false
+  let skip = false
+  const out: string[] = []
+  for (const a of words.slice(1)) {
+    if (skip) {
+      skip = false
+      continue
+    }
+    let option: string | undefined
+    if (a.startsWith('--')) {
+      const long = a.split('=')[0] ?? ''
+      if (table.long.includes(long)) [option, skip] = [long, !a.includes('=')]
+    } else if (/^-[A-Za-z0-9]+$/.test(a)) {
+      // the first value-taking letter of a cluster takes the rest of the word, or the next word when it is last
+      const at = Array.from(a).findIndex((ch, i) => i > 0 && table.short.includes(ch))
+      if (at > 0) [option, skip] = [`-${a[at]}`, at === a.length - 1]
+    }
+    if (option !== undefined) patternGiven ||= ['-e', '-f', '--regexp', '--file'].includes(option)
+    else if (!a.startsWith('-')) out.push(a)
+  }
+  return { operands: out, patternGiven }
+}
+
+/** True when rg, or grep with -r, gets no path operand and so searches the cwd. */
+function searchesCwd(name: string, words: string[]): boolean {
+  const args = words.slice(1)
+  if (name !== 'rg' && !args.some(a => /^-[A-Za-z]*[rR][A-Za-z]*$/.test(a) || ['--recursive', '--dereference-recursive'].includes(a))) return false
+  const given = operands(name, words)
+  return given.operands.length === (given.patternGiven ? 0 : 1)
+}
+
+/** The command cut at SPLIT outside quotes; inside double quotes only at $( and `, which still run there. */
+function splitCommands(command: string): string[] {
+  const out: string[] = []
+  const open: string[] = [] // quotes and substitutions not yet closed: ' " $( ( `
+  let start = 0
+  let i = 0
+  while (i < command.length) {
+    const top = open.at(-1)
+    const ch = command[i] ?? ''
+    if (top === "'") {
+      if (ch === "'") open.pop()
+      i += 1
+      continue
+    }
+    if (ch === '\\') {
+      i += 2
+      continue
+    }
+    if (top === '"') {
+      if (ch === '"') open.pop()
+      if (ch !== '`' && !command.startsWith('$(', i)) {
+        i += 1
+        continue
+      }
+    } else if (ch === "'" || ch === '"') {
+      open.push(ch)
+      i += 1
+      continue
+    } else if (ch === '#' && (i === 0 || /[\s;&|()`]/.test(command[i - 1] ?? ''))) {
+      // a quote in a comment opens nothing
+      const end = command.indexOf('\n', i)
+      i = end < 0 ? command.length : end
+      continue
+    }
+    SPLIT.lastIndex = i
+    const token = SPLIT.exec(command)?.[0]
+    if (token === undefined) {
+      i += 1
+      continue
+    }
+    if (token === '$(' || token === '(' || (token === '`' && top !== '`')) open.push(token)
+    else if ((token === ')' && (top === '$(' || top === '(')) || (token === '`' && top === '`')) open.pop()
+    out.push(command.slice(start, i))
+    i += token.length
+    start = i
+  }
+  out.push(command.slice(start))
+  return out
 }
 
 /** [segment, words] per simple command, past assignments and wrappers. */
 function simpleCommands(command: string): [string, string[]][] {
   const out: [string, string[]][] = []
-  for (const segment of command.split(SPLIT)) {
+  // The plain split cuts too much inside quotes, splitCommands too little past quotes like $'…'; refusing on both only refuses more
+  for (const segment of new Set([...splitCommands(command), ...command.split(new RegExp(SPLIT.source))])) {
     let words: string[]
     try {
       words = shlexSplit(segment)
@@ -267,6 +373,14 @@ async function checkBash(run: Run, command: string, cwd: string): Promise<Found 
       for (const c of cwds) more.push(...(await paths(run, words[1] ?? '', c)))
       cwds = [...new Set([...cwds, ...more])]
     }
+    const flag = SHELLS.test(name) ? words.findIndex((w, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(w)) : -1
+    const script = flag > 0 ? words[flag + 1] : undefined
+    if (script !== undefined) {
+      for (const c of cwds) {
+        const found = await checkBash(run, script, c)
+        if (found) return found
+      }
+    }
     let text = segment
     if (isMessage) {
       text = words.filter((w, i) => !(i > 0 && MESSAGE_FLAGS.includes(words[i - 1] ?? '')) && !/^--(?:message|title|body)=/.test(w)).join(' ')
@@ -276,8 +390,7 @@ async function checkBash(run: Run, command: string, cwd: string): Promise<Found 
     // A recursive search of a directory such as ~/.codex prints lines of the secret files inside it
     if (['grep', 'egrep', 'rg'].includes(name) && !allowed(words)) {
       let hit: string | undefined
-      for (const a of words.slice(1)) {
-        if (a.startsWith('-')) continue
+      for (const a of operands(name, words).operands) {
         const found: string[] = []
         for (const c of cwds) found.push(...(await paths(run, a, c)))
         if (found.some(p => holdsSecret(run, p))) {
@@ -286,6 +399,8 @@ async function checkBash(run: Run, command: string, cwd: string): Promise<Found 
         }
       }
       if (hit) return { reason: REASON, call: segment.trim(), file: `a file under ${hit}` }
+      const held = searchesCwd(name, words) ? cwds.find(c => holdsSecret(run, c)) : undefined
+      if (held) return { reason: REASON, call: segment.trim(), file: `a file under ${held}` }
     }
     if (!allowed(words)) {
       for (const [i, a] of words.entries()) {

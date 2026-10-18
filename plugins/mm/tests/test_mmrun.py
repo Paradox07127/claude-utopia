@@ -70,6 +70,25 @@ with tempfile.TemporaryDirectory() as root:
     r = mmrun(root, "result", "grok", "nested")
     expect("截断在嵌套值处仍取到真对象", (r.returncode, r.stdout.splitlines()[1:2]), (0, ["real"]))
 
+    # pre_existing findings get their own section; --top and --oneline --top leave them out and say how many there are
+    pre = json.loads(review("pre", "major", "critical"))
+    pre["findings"][0]["claim"] = "NEW-ISSUE"; pre["findings"][0]["pre_existing"] = False
+    pre["findings"][1]["claim"] = "OLD-ISSUE"; pre["findings"][1]["pre_existing"] = True
+    make_run(root, "preex", json.dumps(pre))
+    r = mmrun(root, "result", "grok", "preex")
+    crit = r.stdout.split("## CRITICAL", 1)[1].split("## ", 1)[0] if "## CRITICAL" in r.stdout else ""
+    pex = r.stdout.split("## PRE-EXISTING", 1)[1] if "## PRE-EXISTING" in r.stdout else ""
+    expect("pre_existing 单列一节,不进严重度节", ("OLD-ISSUE" in pex, "[critical]" in pex, "OLD-ISSUE" in crit, "NEW-ISSUE" in r.stdout),
+           (True, True, False, True))
+    r = mmrun(root, "result", "grok", "preex", "--top")
+    expect("--top 不含 pre_existing,写出条数", ("OLD-ISSUE" in r.stdout, "NEW-ISSUE" in r.stdout, "Pre-existing (not shown): 1" in r.stdout,
+           "[critical]" in r.stdout), (False, True, True, False))
+    r = mmrun(root, "result", "grok", "preex", "--top", "--oneline")
+    expect("--top --oneline 不含 pre_existing", ("OLD-ISSUE" in r.stdout, "NEW-ISSUE" in r.stdout), (False, True))
+    schema = json.loads(SCHEMA.read_text())["properties"]["findings"]["items"]
+    expect("schema:pre_existing 是必填布尔", ("pre_existing" in schema["required"], schema["properties"].get("pre_existing", {}).get("type")),
+           (True, "boolean"))
+
     # 模型正文裹 ```json 围栏
     make_run(root, "fenced", "```json\n" + review("fenced", "critical") + "\n```\n")
     r = mmrun(root, "result", "grok", "fenced", "--top")
@@ -444,8 +463,8 @@ with tempfile.TemporaryDirectory() as root:
         fake = pathlib.Path(tmp, "rp", "empty"); fake.write_text("#!/bin/sh\necho '{}'\n"); fake.chmod(0o755)
         for rid, mode in (("rp-run", "run"), ("rp-review", "review")):
             rd = pathlib.Path(root, rid); rd.mkdir()
-            rd.joinpath("run.meta").write_text(f"runid={rid}\nmode={mode}\nmodels=grok\nworkdir={repo}\nbase_sha={sha}\n")
-            rd.joinpath("grok.patch").write_text("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+patch-marker-line\n")
+            rd.joinpath("run.meta").write_text(f"runid={rid}\nmode={mode}\nmodels=codex\nworkdir={repo}\nbase_sha={sha}\n")
+            rd.joinpath("codex.patch").write_text("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a\n+patch-marker-line\n")
         renv = dict(env, GROK_BIN=str(fake), CODEX_BIN=str(fake))
         r = subprocess.run([str(MMRUN), "review", "--patch", "rp-run", "--models", "grok"],
                            capture_output=True, text=True, env=renv, timeout=60)
@@ -458,6 +477,17 @@ with tempfile.TemporaryDirectory() as root:
         r = subprocess.run([str(MMRUN), "review", "--patch", "rp-review", "--models", "grok"],
                            capture_output=True, text=True, env=renv, timeout=60)
         expect("review --patch:非派活 run 拒绝", r.returncode != 0, True)
+        # the model that wrote the patch does not review it
+        r = subprocess.run([str(MMRUN), "review", "--patch", "rp-run", "--models", "codex"],
+                           capture_output=True, text=True, env=renv, timeout=60)
+        expect("review --patch:只剩写 patch 的模型时拒绝", (r.returncode != 0, "wrote this patch" in r.stderr), (True, True))
+        r = subprocess.run([str(MMRUN), "review", "--patch", "rp-run", "--models", "codex,grok"],
+                           capture_output=True, text=True, env=renv, timeout=60)
+        nrid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+        meta = pathlib.Path(root, nrid, "run.meta")
+        expect("review --patch:从审查模型里去掉写 patch 的模型",
+               ("models=grok\n" in (meta.read_text() if meta.exists() else ""), "codex wrote this patch" in r.stdout), (True, True))
+        if nrid != "missing": mmrun(root, "wait", nrid, "--timeout", "60")
 
         # review 提示词:材料包在 <review_input> 里、严重度含"拿不准"、不用加粗;--full 时不说"不报改动前已存在的问题"
         repo = pathlib.Path(tmp, "pr", "repo"); git("init", "-q", str(repo))
@@ -470,7 +500,7 @@ with tempfile.TemporaryDirectory() as root:
             if prid != "missing": mmrun(root, "wait", prid, "--timeout", "60")
             p = pathlib.Path(root, prid, "prompt.md")
             return p.read_text() if p.exists() else ""
-        PRE = "Do not report problems that existed before this change."
+        PRE = "set pre_existing to true"
         ptext = review_prompt()
         expect("review 提示词:review_input 包装、拿不准、无加粗、含改动前那句",
                ("<review_input>\n" in ptext, "\n</review_input>" in ptext, "If unsure" in ptext, "**" in ptext, PRE in ptext),
@@ -479,7 +509,11 @@ with tempfile.TemporaryDirectory() as root:
         expect("review 提示词:含 issue_identity 说明", IID in ptext, True)
         ptext = review_prompt("--full", "--paths", "a.txt")
         expect("review --full 提示词:不含改动前那句", (bool(ptext), PRE in ptext, "**" in ptext), (True, False, False))
+        expect("review --full 提示词:pre_existing 一律 false", "Set pre_existing to false" in ptext, True)
         ptext = review_prompt("--exhaustive")
+        expect("review --exhaustive 提示词:含改动前那句", PRE in ptext, True)
+        ANGLES = ("For each removed or replaced line", "find its callers", "passes every argument", "Language pitfalls")
+        expect("review --exhaustive 提示词:含检查角度", all(a in ptext for a in ANGLES), True)
         expect("review --exhaustive 提示词:同一根因只报一次、无加粗", ("Report each root cause once" in ptext, "**" in ptext), (True, False))
         expect("review --exhaustive 提示词:含 issue_identity 说明", IID in ptext, True)
         REQ = "explicitly stated requirement"
@@ -487,11 +521,35 @@ with tempfile.TemporaryDirectory() as root:
         ptext = review_prompt()
         expect("review 提示词:无 focus/notes 时不提明示需求",
                (REQ in ptext, "Report only problems that affect correctness;" in ptext), (False, True))
+        expect("review 提示词:含检查角度", all(a in ptext for a in ANGLES), True)
         ptext = review_prompt("--focus", "x")
         expect("review --focus 提示词:含明示需求那句", REQ in ptext, True)
         notes = pathlib.Path(tmp, "pr", "notes.md"); notes.write_text("需求:a.txt 必须是 changed\n")
         ptext = review_prompt("--notes-file", str(notes))
         expect("review --notes-file 提示词:含明示需求那句", REQ in ptext, True)
+
+        # rules files: root CLAUDE.md, CLAUDE.md in each ancestor of a changed file, REVIEW.md; read from the base version, not the change
+        repo = pathlib.Path(tmp, "rules", "repo"); git("init", "-q", str(repo))
+        for pth, txt in {"CLAUDE.md": "ROOT-RULE\n", "REVIEW.md": "REVIEW-RULE\n", "sub/CLAUDE.md": "SUB-RULE\n",
+                         "other/CLAUDE.md": "OTHER-RULE\n", "sub/x.txt": "x\n"}.items():
+            repo.joinpath(pth).parent.mkdir(parents=True, exist_ok=True); repo.joinpath(pth).write_text(txt)
+        git("-C", str(repo), "add", "-A"); git("-C", str(repo), "commit", "-qm", "init")
+        repo.joinpath("sub/x.txt").write_text("y\n"); repo.joinpath("REVIEW.md").write_text("CHANGED-RULE\n")
+        r = subprocess.run([str(MMRUN), "review", "--models", "grok", "--dir", str(repo)],
+                           capture_output=True, text=True, env=renv, timeout=60)
+        rrid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+        if rrid != "missing": mmrun(root, "wait", rrid, "--timeout", "60")
+        p = pathlib.Path(root, rrid, "prompt.md"); head = (p.read_text() if p.exists() else "").split("<review_input>", 1)[0]
+        expect("review 规则文件:根、祖先目录的 CLAUDE.md 和 REVIEW.md 进 prompt,无关目录的不进,取基线版本",
+               ("## Repository rules" in head, "ROOT-RULE" in head, "SUB-RULE" in head, "REVIEW-RULE" in head,
+                "OTHER-RULE" in head, "CHANGED-RULE" in head), (True, True, True, True, False, False))
+        git("-C", str(repo), "commit", "-qam", "c2")
+        r = subprocess.run([str(MMRUN), "review", "--models", "grok", "--dir", str(repo), "--commit", "HEAD"],
+                           capture_output=True, text=True, env=renv, timeout=60)
+        rrid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+        if rrid != "missing": mmrun(root, "wait", rrid, "--timeout", "60")
+        p = pathlib.Path(root, rrid, "prompt.md"); head = (p.read_text() if p.exists() else "").split("<review_input>", 1)[0]
+        expect("review --commit 规则文件:取父提交的版本", ("REVIEW-RULE" in head, "CHANGED-RULE" in head), (True, False))
 
         # apply 闸门:敏感路径拒绝,--allow-sensitive 放行;HEAD 离开 base 时提示
         def apply_case(rid, files, edits):
@@ -2348,8 +2406,8 @@ with tempfile.TemporaryDirectory() as sroot, tempfile.TemporaryDirectory() as st
 
     prun = pathlib.Path(sroot, "pr-run"); prun.mkdir()
     repo = srepo("patchscope", {})
-    prun.joinpath("run.meta").write_text(f"runid=pr-run\nmode=run\nmodels=grok\nworkdir={repo}\nbase_sha=\n")
-    prun.joinpath("grok.patch").write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+P\n"
+    prun.joinpath("run.meta").write_text(f"runid=pr-run\nmode=run\nmodels=codex\nworkdir={repo}\nbase_sha=\n")
+    prun.joinpath("codex.patch").write_text("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -0,0 +1 @@\n+P\n"
                                            "diff --git a/c.json b/c.json\n--- a/c.json\n+++ b/c.json\n@@ -0,0 +1 @@\n+{}\n")
     r, ps, rids = sreview(repo, "--patch", "pr-run")
     head = ps[0].split("<review_input>", 1)[0] if ps else ""
@@ -2366,6 +2424,290 @@ with tempfile.TemporaryDirectory() as sroot, tempfile.TemporaryDirectory() as st
     m = material(ps[0]) if ps else ""
     expect("review --full:源码在材料里,测试数据和 JSON 不在", (r.returncode, "FULL-SRC" in m, "FULL-FIXTURE" in m, "FULL-JSON" in m),
            (0, True, False, False))
+
+def vfinding(severity, claim, pre=False):
+    return {"severity": severity, "file": "a.py", "line": 1, "quote": "q", "claim": claim, "failure_scenario": "f",
+            "basis": "traced", "suggestion": None, "issue_identity": "some-thing", "pre_existing": pre}
+
+def vreview(*findings):
+    return {"verdict": "request_changes", "summary": "s", "not_checked": [], "not_expanded": 0, "findings": list(findings)}
+
+with tempfile.TemporaryDirectory() as vroot:
+    # render: grok's findings checked by codex, verify.json written by hand
+    rd = make_run(vroot, "vr", json.dumps(vreview(vfinding("major", "REFUTED-CLAIM"), vfinding("minor", "UPGRADED-CLAIM"),
+                                                  vfinding("major", "DOWNGRADED-CLAIM"), vfinding("major", "UNVERIFIED-CLAIM"),
+                                                  vfinding("major", "CONFIRMED-LOW-CLAIM"))))
+    rd.joinpath("verify.json").write_text(json.dumps([
+        {"model": "grok", "index": 0, "verifier": "codex", "verdict": "refuted", "severity": "major", "evidence": "a.py:1 GUARD-EVIDENCE"},
+        {"model": "grok", "index": 1, "verifier": "codex", "verdict": "confirmed", "severity": "major", "evidence": "e"},
+        {"model": "grok", "index": 2, "verifier": "codex", "verdict": "plausible", "severity": "minor", "evidence": "e"},
+        {"model": "grok", "index": 4, "verifier": "codex", "verdict": "confirmed", "severity": "minor", "evidence": "e"}]))
+    def vline(text, claim):
+        return next((l for l in text.splitlines() if claim in l), "")
+    top = mmrun(vroot, "result", "grok", "vr", "--top").stdout
+    expect("verify render --top:refuted 不出现,写出条数",
+           ("REFUTED-CLAIM" in top, "Refuted by the verifier (not shown): 1" in top), (False, True))
+    expect("verify render --top:原 minor、核对者 major 的进 MAJOR,带核对标签",
+           ("UPGRADED-CLAIM" in top.split("## MAJOR", 1)[-1], "[confirmed by codex] [codex: major]" in vline(top, "UPGRADED-CLAIM")), (True, True))
+    expect("verify render --top:原 major、核对者 minor 的不出现,写出条数",
+           ("DOWNGRADED-CLAIM" in top, "Downgraded by the verifier (not shown): 1" in top), (False, True))
+    expect("verify render --top:confirmed 取原严重度与核对者严重度中较高的",
+           ("CONFIRMED-LOW-CLAIM" in top.split("## MAJOR", 1)[-1], "[confirmed by codex] [codex: minor]" in vline(top, "CONFIRMED-LOW-CLAIM")),
+           (True, True))
+    expect("verify render --top:没验证结果的照旧按原严重度,不带标签",
+           ("UNVERIFIED-CLAIM" in top, "codex" in vline(top, "UNVERIFIED-CLAIM")), (True, False))
+    full = mmrun(vroot, "result", "grok", "vr").stdout
+    fmajor, fminor = full.split("## MAJOR", 1)[-1].split("## MINOR", 1)
+    expect("verify render 不带 --top:按原严重度分节,refuted 也列出并写原因",
+           (all(c in fmajor for c in ("REFUTED-CLAIM", "DOWNGRADED-CLAIM", "UNVERIFIED-CLAIM")), "UPGRADED-CLAIM" in fminor,
+            "[refuted by codex]" in vline(full, "REFUTED-CLAIM"), "[plausible per codex] [codex: minor]" in vline(full, "DOWNGRADED-CLAIM"),
+            "Refuted because: a.py:1 GUARD-EVIDENCE" in fmajor), (True, True, True, True, True))
+    one = mmrun(vroot, "result", "grok", "vr", "--top", "--oneline").stdout
+    expect("verify render --oneline:行上带核对标签", "[confirmed by codex] [codex: major]" in vline(one, "UPGRADED-CLAIM"), True)
+
+    # result verify: prints verify.out; without it, status and reason
+    rd.joinpath("verify.out").write_text("verification: VERIFY-OUT-MARK\n")
+    r = mmrun(vroot, "result", "verify", "vr", "--top")
+    expect("result verify:打印 verify.out", (r.returncode, r.stdout), (0, "verification: VERIFY-OUT-MARK\n"))
+    rd2 = make_run(vroot, "vs", json.dumps(vreview()))
+    rd2.joinpath("verify.status").write_text("SKIP\n"); rd2.joinpath("verify.reason").write_text("fewer than 2 models finished\n")
+    r = mmrun(vroot, "result", "verify", "vs")
+    expect("result verify:没有 verify.out 时打印状态和原因", (r.returncode, "SKIP" in r.stdout, "fewer than 2 models finished" in r.stdout), (0, True, True))
+    rd2.joinpath("verify.status").write_text("RUNNING\n")
+    r = mmrun(vroot, "verify", "vs")
+    expect("mmrun verify:verify RUNNING 时拒绝", (r.returncode != 0, rd2.joinpath("verify.status").read_text()), (True, "RUNNING\n"))
+
+with tempfile.TemporaryDirectory() as vroot, tempfile.TemporaryDirectory() as vtmp:  # 假二进制、仓库不能放在 MMRUN_HOME 下
+    vtmp = pathlib.Path(os.path.realpath(vtmp)); vhome = vtmp / "home"; vhome.mkdir()
+    vrepo = vtmp / "repo"; git("init", "-q", str(vrepo))
+    vrepo.joinpath("a.py").write_text("a\n"); git("-C", str(vrepo), "add", "a.py"); git("-C", str(vrepo), "commit", "-qm", "init")
+    vrepo.joinpath("a.py").write_text("changed\n")
+    data = {"grok-review": {"structuredOutput": vreview(vfinding("major", "G0-CLAIM"), vfinding("minor", "G1-CLAIM"), vfinding("major", "G2-PRE", pre=True))},
+            "grok-verdicts": {"structuredOutput": {"summary": "s", "verdicts": [
+                {"id": "F1", "verdict": "confirmed", "severity": "major", "evidence": "e"}]}},
+            "codex-review": vreview(vfinding("critical", "C0-CLAIM")),
+            "codex-verdicts": {"summary": "s", "verdicts": [{"id": "F1", "verdict": "refuted", "severity": "minor", "evidence": "e"},
+                                                            {"id": "F2", "verdict": "plausible", "severity": "minor", "evidence": "e"}]}}
+    for k, v in data.items(): vtmp.joinpath(k + ".json").write_text(json.dumps(v) + "\n")
+    vgrok = vtmp / "grok"
+    vgrok.write_text('#!/bin/sh\npf=""; prev=""\nfor a in "$@"; do [ "$prev" = --prompt-file ] && pf="$a"; prev="$a"; done\n'
+                     f'if grep -qx F1 "$pf"; then [ -n "$SLOWV" ] && sleep 30; cat "{vtmp}/grok-verdicts.json"; else cat "{vtmp}/grok-review.json"; fi\n')
+    vcodex = vtmp / "codex"
+    vcodex.write_text('#!/bin/sh\n' + MCP_NONE + 'out=""; prev=""\nfor a in "$@"; do [ "$prev" = -o ] && out="$a"; prev="$a"; done\n'
+                      f'if cat | grep -qx F1; then [ -n "$SLOWV" ] && sleep 30; cat "{vtmp}/codex-verdicts.json" > "$out"; else cat "{vtmp}/codex-review.json" > "$out"; fi\n')
+    for f in (vgrok, vcodex): f.chmod(0o755)
+    venv = dict(os.environ, HOME=str(vhome), MMRUN_HOME=vroot, MMRUN_D=str(PLUGIN / "mmrun.d"), GROK_BIN=str(vgrok), CODEX_BIN=str(vcodex),
+                MMRUN_SESSION="vsess")
+    def vrun(*args):
+        r = subprocess.run([str(MMRUN), *args], capture_output=True, text=True, env=venv, stdin=subprocess.DEVNULL, timeout=120)
+        rid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+        if rid != "missing": mmrun(vroot, "wait", rid, "--timeout", "60")
+        return r, rid
+    def vread(rid, name):
+        p = pathlib.Path(vroot, rid, name)
+        return p.read_text() if p.exists() else None
+    def vmeta(rid, key):
+        return next((l.split("=", 1)[1] for l in (vread(rid, "run.meta") or "").splitlines() if l.startswith(key + "=")), "")
+    def vtuples(rid):
+        return sorted((e["model"], e["index"], e["verifier"], e["verdict"]) for e in json.loads(vread(rid, "verify.json") or "[]"))
+    WANT = [("codex", 0, "grok", "confirmed"), ("grok", 0, "codex", "refuted"), ("grok", 1, "codex", "plausible")]
+
+    r, rid = vrun("review", "--models", "codex,grok", "--dir", str(vrepo))
+    expect("verify 两家:wait 返回时 verify.status 为 DONE", (r.returncode, vread(rid, "verify.status")), (0, "DONE\n"))
+    expect("verify 两家:verify.json 的 (model, index, verifier) 对", vtuples(rid), WANT)
+    kids = [k for k in vmeta(rid, "verify_runs").split(",") if k]
+    prompts = {vmeta(k, "models"): vread(k, "prompt.md") or "" for k in kids}
+    claims = {m: p.split("## Claims to check", 1)[-1] for m, p in prompts.items()}
+    expect("verify 两家:两个子 run,各一家核对", (len(kids), sorted(prompts)), (2, ["codex", "grok"]))
+    expect("verify 两家:grok 只核对 codex 的声明,codex 只核对 grok 的",
+           ("C0-CLAIM" in claims.get("grok", ""), "G0-CLAIM" in claims.get("grok", ""),
+            all(c in claims.get("codex", "") for c in ("G0-CLAIM", "G1-CLAIM")), "C0-CLAIM" in claims.get("codex", "")), (True, False, True, False))
+    expect("verify 两家:pre_existing 的不进核对 prompt", any("G2-PRE" in p for p in prompts.values()), False)
+    expect("verify 两家:声明里没有原严重度和报告模型",
+           [w for c in claims.values() for w in ("severity", "critical", "major", "minor", "codex", "grok") if w in c], [])
+    expect("verify 两家:prompt 带 review_input 和审查范围",
+           [("<review_input>" in p, "## Review scope" in p) for p in prompts.values()], [(True, True)] * 2)
+    expect("verify 两家:子 run 不成为本会话的 latest", (pathlib.Path(vroot, ".latest-vsess").read_text().strip()), rid)
+    r = mmrun(vroot, "result", "verify", rid)
+    expect("verify 两家:result verify 打印汇总",
+           r.stdout, "verification: 3 findings sent to the other model; 1 confirmed, 1 plausible, 1 refuted, 0 not verified\n")
+    r = subprocess.run([str(MMRUN), "verify", rid], capture_output=True, text=True, env=venv, timeout=60)
+    mmrun(vroot, "wait", rid, "--timeout", "60")
+    again = [k for k in vmeta(rid, "verify_runs").split(",") if k]
+    expect("mmrun verify:已结束的 run 重做验证",
+           (r.returncode, r.stdout.splitlines()[0] if r.stdout else "", vread(rid, "verify.status"), vtuples(rid), len(again), set(again) & set(kids)),
+           (0, f"VERIFY {rid}", "DONE\n", WANT, 2, set()))
+
+    r, rid = vrun("review", "--models", "grok", "--dir", str(vrepo))
+    expect("verify 一家:SKIP,原因写明", (vread(rid, "verify.status"), vread(rid, "verify.reason")), ("SKIP\n", "fewer than 2 models finished\n"))
+    r, rid = vrun("review", "--models", "codex,grok", "--dir", str(vrepo), "--no-verify")
+    expect("verify --no-verify:没有 verify.status", (rid != "missing", vread(rid, "verify.status")), (True, None))
+
+    # the check runs render their own verdicts: .out is not the raw JSON, and result reads it
+    expect("verify 子 run:.out 是渲染过的,result 能读",
+           [(vread(k, vmeta(k, "models") + ".out") or "").startswith("verdicts:") and mmrun(vroot, "result", vmeta(k, "models"), k).returncode == 0
+            for k in kids], [True, True])
+    r, rid = vrun("review", "--models", "codex,grok", "--dir", str(vrepo), "--codex-model", "CX-M", "--grok-model", "GK-M")
+    kids2 = [k for k in vmeta(rid, "verify_runs").split(",") if k]
+    expect("verify 子 run:沿用 review 的 --codex-model/--grok-model",
+           sorted((vmeta(k, "models"), vmeta(k, "model_" + vmeta(k, "models"))) for k in kids2), [("codex", "CX-M"), ("grok", "GK-M")])
+
+    # cancel during verification: the check runs stop too
+    r = subprocess.run([str(MMRUN), "review", "--models", "codex,grok", "--dir", str(vrepo)], capture_output=True, text=True,
+                       env=dict(venv, SLOWV="1"), stdin=subprocess.DEVNULL, timeout=60)
+    rid = r.stdout.split("RUN ", 1)[1].split()[0]
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        kids3 = [k for k in vmeta(rid, "verify_runs").split(",") if k]
+        if len(kids3) == 2 and all(vread(k, vmeta(k, "models") + ".pid") for k in kids3): break
+        time.sleep(0.2)
+    kpids = [int(vread(k, vmeta(k, "models") + ".pid")) for k in kids3]
+    r = mmrun(vroot, "cancel", rid)
+    def alive(pid):
+        try: os.kill(pid, 0); return True
+        except OSError: return False
+    expect("cancel:verify 跑着时连核对子 run 一起停",
+           (r.returncode, vread(rid, "verify.status"), [vread(k, vmeta(k, "models") + ".status") for k in kids3], [alive(p) for p in kpids]),
+           (0, "CANCELLED\n", ["CANCELLED\n"] * 2, [False, False]))
+
+    # ask --from waits only for the review models, not for verification
+    ad = pathlib.Path(vroot, "askv"); ad.mkdir()
+    ad.joinpath("run.meta").write_text(f"runid=askv\nmode=review\nmodels=grok\nworkdir={vrepo}\n")
+    ad.joinpath("grok.status").write_text("DONE\n"); ad.joinpath("grok.sid").write_text("sid-askv\n")
+    sleeper = subprocess.Popen(["sleep", "30"])
+    ad.joinpath("verify.status").write_text("RUNNING\n"); ad.joinpath("verify.pid").write_text(f"{sleeper.pid}\n")
+    ad.joinpath("verify.started").write_text(f"{int(time.time())}\n")
+    r = mmrun(vroot, "ask", "--from", "askv", "--models", "grok", "--with", "nosuch:grok")
+    sleeper.kill()
+    expect("ask --from:verify 跑着时不拒绝", ("unknown run nosuch" in r.stderr, "still running" in r.stderr), (True, False))
+
+# ---------- deepseek(dsh headless):事件流取结果与用量、续聊、schema 附在 prompt 末尾、额度、围栏 ----------
+with tempfile.TemporaryDirectory() as dtmp:  # 假二进制、记录、被审仓库都不能放在 MMRUN_HOME 下:围栏禁读该目录
+    dtmp = pathlib.Path(os.path.realpath(dtmp))
+    drepo = dtmp / "repo"; git("init", "-q", str(drepo))
+    drepo.joinpath("a.txt").write_text("a\n"); git("-C", str(drepo), "add", "a.txt"); git("-C", str(drepo), "commit", "-qm", "init")
+    drepo.joinpath("a.txt").write_text("changed\n")
+    droot, dfake, drec, din = str(test_runs), dtmp / "dsh", dtmp / "dsh.rec", dtmp / "dsh.stdin"
+    def dstep(i, o):
+        return json.dumps({"type": "status", "phase": "step_end",
+                           "usage": {"inputTokens": i, "outputTokens": o, "cacheReadTokens": 1, "cacheWriteTokens": 0, "totalTokens": i + o}})
+    def devents(final, sid="session-d1"):
+        return "\n".join([json.dumps({"type": "session", "sessionId": sid, "cwd": "/x"}), dstep(10, 3),
+                          json.dumps({"type": "text", "text": "partial"}), dstep(20, 4),
+                          json.dumps({"type": "final", "text": final})]) + "\n"
+    def fake_dsh(tail):  # 每次调用记 argv、DSH_PERMISSION_MODE、MMRUN_DSH_MODEL,stdin 存进 din
+        if drec.exists(): drec.unlink()
+        dfake.write_text("#!/bin/sh\n{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done\n"
+                         f"  echo \"PERM=$DSH_PERMISSION_MODE\"; echo \"MODEL=$MMRUN_DSH_MODEL\"; echo ---; }} >> '{drec}'\n"
+                         f"cat > '{din}'\n" + tail); dfake.chmod(0o755)
+    def dcalls():
+        return [c.splitlines() for c in drec.read_text().split("---\n")[:-1]] if drec.exists() else []
+    def dfile(name, text):
+        p = dtmp / name; p.write_text(text); return p
+    def dout(name, text):  # like node in dsh, macOS cat fails when its stdout is a file in the fence's read-denied mmruns
+        return f"cat '{dfile(name, text)}'\n"
+    denv = dict(os.environ, HOME=str(TEST_HOME), MMRUN_HOME=droot, MMRUN_D=str(PLUGIN / "mmrun.d"), DSH_BIN=str(dfake))
+    def dcmd(*args, prompt="q\n"):
+        r = subprocess.run([str(MMRUN), *args], input=prompt, capture_output=True, text=True, env=denv, timeout=60,
+                           **({} if prompt is not None else {"stdin": subprocess.DEVNULL}))
+        rid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+        if rid != "missing": mmrun(droot, "wait", rid, "--timeout", "60")
+        return r, rid
+    def dread(rid, name):
+        p = pathlib.Path(droot, rid, name)
+        return p.read_text() if p.exists() else None
+    DPATCH = str(PLUGIN / "mmrun.d/dsh-mm.patch.yml")
+
+    # e. 额度:turn_end 的错误码 QUOTA / stderr 的 ACCOUNT_QUOTA 算撞额度不重试;其它失败重试一次
+    qend = json.dumps({"type": "turn_end", "reason": {"kind": "error", "error": {"message": "quota exhausted", "code": "QUOTA"}}})
+    fake_dsh(dout("q.ndjson", json.dumps({"type": "session", "sessionId": "session-q"}) + "\n" + qend + "\n")
+             + "echo '{\"type\":\"final\",\"text\":\"\"}'\necho 'dsh: QUOTA: quota exhausted' >&2\nexit 1\n")
+    _, rid = dcmd("start", "--models", "deepseek", "--dir", str(drepo))
+    expect("deepseek 额度 QUOTA:FAIL:quota、只调用一次、reason",
+           (dread(rid, "deepseek.status"), len(dcalls()), (dread(rid, "deepseek.reason") or "").startswith("deepseek hit the quota mid-run:")),
+           ("FAIL:quota\n", 1, True))
+    fake_dsh("echo 'dsh: ACCOUNT_QUOTA: account balance is empty' >&2\nexit 1\n")
+    _, rid = dcmd("start", "--models", "deepseek", "--dir", str(drepo))
+    expect("deepseek 额度 ACCOUNT_QUOTA(只在 stderr):FAIL:quota、只调用一次", (dread(rid, "deepseek.status"), len(dcalls())), ("FAIL:quota\n", 1))
+    fake_dsh("echo 'dsh: NETWORK: connection reset' >&2\nexit 1\n")
+    _, rid = dcmd("start", "--models", "deepseek", "--dir", str(drepo))
+    expect("deepseek 其它失败:重试一次、FAIL:1", (dread(rid, "deepseek.status"), len(dcalls())), ("FAIL:1\n", 2))
+
+    # f. 围栏:别家读不到 ~/.dsh,deepseek 读不到别家的状态目录;codex 各层也 deny ~/.dsh
+    dsdirs = {n: TEST_HOME / n for n in (".grok", ".dsh")}
+    for d in dsdirs.values(): d.mkdir(exist_ok=True); d.joinpath("x").write_text("s\n")
+    def ds_fence(state, script):
+        return subprocess.run([str(MMRUN), "__fence", "/nonexistent", str(state), "/nonexistent", "/nonexistent", "/bin/sh", "-c", script],
+                              capture_output=True, text=True, env=denv, cwd=dtmp, timeout=60)
+    expect("fence STATE=~/.grok:读 ~/.dsh 被拒", ds_fence(dsdirs[".grok"], f"cat {dsdirs['.dsh']}/x").returncode != 0, True)
+    expect("fence STATE=~/.dsh:读 ~/.grok 被拒", ds_fence(dsdirs[".dsh"], f"cat {dsdirs['.grok']}/x").returncode != 0, True)
+    expect("fence STATE=~/.dsh:读写自己的状态目录成功",
+           ds_fence(dsdirs[".dsh"], f"cat {dsdirs['.dsh']}/x && echo w >> {dsdirs['.dsh']}/x").returncode, 0)
+    dch = dtmp / "codex-home"
+    subprocess.run([str(MMRUN), "__room_profile", "dsprobe", str(dtmp), "P1"], capture_output=True, env=dict(denv, CODEX_HOME=str(dch)), timeout=60)
+    subprocess.run([str(MMRUN), "__mmwt_profile", "dsprobe", str(dtmp)], capture_output=True, env=dict(denv, CODEX_HOME=str(dch)), timeout=60)
+    ddeny = f'"{TEST_HOME}/.dsh" = "deny"'
+    expect("mm 模板、mmwt 层、room 层:都 deny ~/.dsh",
+           [ddeny in ((dch / n).read_text().splitlines() if (dch / n).exists() else [])
+            for n in ("mm.config.toml", "mmwt-dsprobe.config.toml", "mmroom-dsprobe-P1.config.toml")], [True, True, True])
+    # review 形态:写不进被审仓库、读不到 mmruns
+    dprobe = pathlib.Path(tempfile.mkdtemp(prefix=".dsprobe-", dir=test_runs)); dprobe.joinpath("x").write_text("p\n")
+    dfr = dtmp / "fence.rec"
+    try:
+        fake_dsh(f"if cat '{dprobe}/x' >/dev/null 2>&1; then echo READ >> '{dfr}'; else echo NOREAD >> '{dfr}'; fi\n"
+                 f"echo pwned 2>/dev/null > '{drepo}/a.txt'; touch '{drepo}/new' 2>/dev/null\n"
+                 + dout("fr.ndjson", devents(review("s", "major"))))
+        _, rid = dcmd("review", "--models", "deepseek", "--dir", str(drepo), "--no-verify", prompt=None)
+        expect("deepseek review 形态:读不到 mmruns、写不进被审仓库",
+               (dfr.read_text() if dfr.exists() else None, drepo.joinpath("a.txt").read_text(), drepo.joinpath("new").exists()),
+               ("NOREAD\n", "changed\n", False))
+    finally:
+        shutil.rmtree(dprobe, ignore_errors=True)
+
+    # a. start:结果是 final 文本,sid 是 session 事件的 id,meta 的 usage 是各 step_end 之和
+    fake_dsh(dout("a.ndjson", devents("hello from dsh")))
+    r, arid = dcmd("start", "--models", "deepseek", "--dir", str(drepo))
+    expect("deepseek start:DONE、result 是 final 文本、sid 取 session 事件",
+           (dread(arid, "deepseek.status"), mmrun(droot, "result", "deepseek", arid).stdout.strip(), dread(arid, "deepseek.sid")),
+           ("DONE\n", "hello from dsh", "session-d1\n"))
+    expect("deepseek start:meta 的 usage 是两个 step_end 之和,input_tokens 含缓存读",
+           "usage=" + json.dumps({"input_tokens": 32, "cached_input_tokens": 2, "output_tokens": 7}, separators=(",", ":")) in (dread(arid, "deepseek.meta") or "").splitlines(), True)
+    # b. argv、权限模式、模型名
+    expect("deepseek argv:headless --patch <mmrun.d>/dsh-mm.patch.yml --json -、danger-full-access、默认模型名为空",
+           (dcalls() or [None])[0], ["headless", "--patch", DPATCH, "--json", "-", "PERM=danger-full-access", "MODEL="])
+    expect("deepseek 无 schema:stdin 就是 prompt", din.read_text() if din.exists() else None, "q\n")
+    fake_dsh(dout("a.ndjson", devents("hello from dsh")))
+    dcmd("start", "--models", "deepseek", "--dir", str(drepo), "--deepseek-model", "deepseek-v4-pro")
+    expect("deepseek --deepseek-model:MMRUN_DSH_MODEL 为它", ((dcalls() or [[]])[0])[-1:], ["MODEL=deepseek-v4-pro"])
+    # d. ask --from:续聊带 --session-id
+    fake_dsh(dout("d.ndjson", devents("again")))
+    r, drid = dcmd("ask", "--from", arid, prompt="second\n")
+    expect("deepseek ask --from:argv 含 --session-id <sid>、DONE",
+           ((dcalls() or [None])[0], dread(drid, "deepseek.status")),
+           (["headless", "--patch", DPATCH, "--json", "--session-id", "session-d1", "-", "PERM=danger-full-access", "MODEL="], "DONE\n"))
+    # c. review 带 schema:schema 附在 stdin 末尾,合 schema 的回答能渲染
+    fake_dsh(dout("c.ndjson", devents(review("ds-review", "major"))))
+    r, crid = dcmd("review", "--models", "deepseek", "--dir", str(drepo), "--no-verify", prompt=None)
+    dstdin = din.read_text() if din.exists() else ""
+    expect("deepseek review:stdin 末尾是 schema 指令和 schema 内容",
+           ("\n\nReply with only one JSON object that conforms to this JSON Schema, and no other text:\n" in dstdin,
+            dstdin.endswith(SCHEMA.read_text())), (True, True))
+    out = mmrun(droot, "result", "deepseek", crid).stdout
+    expect("deepseek review:result 渲染出 finding", (dread(crid, "deepseek.status"), "ds-review" in out, "## MAJOR" in out), ("DONE\n", True, True))
+    # run 形态:能写 worktree,patch 收进来
+    drun = dtmp / "runrepo" / "repo"; git("init", "-q", str(drun))
+    drun.joinpath("a.txt").write_text("a\n"); git("-C", str(drun), "add", "a.txt"); git("-C", str(drun), "commit", "-qm", "init")
+    fake_dsh("echo b > a.txt\n" + dout("r.ndjson", devents("done")))
+    r = subprocess.run([str(MMRUN), "run", "--model", "deepseek", "--task", str(dfile("task.md", "t\n")), "--dir", str(drun),
+                        "--model-name", "deepseek-v4-pro"], capture_output=True, text=True, env=denv, timeout=60)
+    rrid = r.stdout.split("RUN ", 1)[1].split()[0] if "RUN " in r.stdout else "missing"
+    if rrid != "missing": mmrun(droot, "wait", rrid, "--timeout", "60")
+    expect("deepseek run:DONE、patch 含 a.txt、--model-name 传成 MMRUN_DSH_MODEL",
+           (dread(rrid, "deepseek.status"), "a.txt" in (dread(rrid, "deepseek.patch") or ""), ((dcalls() or [[]])[0])[-1:]),
+           ("DONE\n", True, ["MODEL=deepseek-v4-pro"]))
+    if rrid != "missing": mmrun(droot, "discard", rrid)
+    usage = subprocess.run([str(MMRUN)], capture_output=True, text=True, env=denv).stdout
+    expect("usage 列出 --deepseek-model 与 ~/.dsh", ("--deepseek-model NAME" in usage, "~/.dsh" in usage), (True, True))
 
 print(f"\n{len(failures)} failed" if failures else "\nall passed")
 raise SystemExit(1 if failures else 0)

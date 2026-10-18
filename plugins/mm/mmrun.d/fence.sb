@@ -1,5 +1,5 @@
 ; macOS seatbelt fence used by mmrun (sandbox-exec -f fence.sb -D ...).
-; For CLIs whose own sandbox is unusable, like grok / agy (grok refuses to start when /var/run/docker.sock is a symlink),
+; For CLIs whose own sandbox is unusable, like grok / agy / deepseek (grok refuses to start when /var/run/docker.sock is a symlink),
 ; it still ensures: (1) no reads of other models' output and state dirs, Claude transcripts, codex sessions; (2) writes only to WT (delegated worktree), own state dir, temp dirs and /dev.
 ; Review mode points WT at a nonexistent path = whole disk read-only.
 (version 1)
@@ -7,6 +7,7 @@
 ; Each model's state dir is unreadable to the others; before the denies below so its own STATE allow cannot override them
 (deny file-read* (subpath (param "GROK_STATE")))
 (deny file-read* (subpath (param "AGY_STATE")))
+(deny file-read* (subpath (param "DSH_STATE")))
 (allow file-read* (subpath (param "STATE")))
 (deny file-read* (subpath (param "MMRUNS")))
 (deny file-read* (subpath (param "CLAUDE_PROJECTS")))

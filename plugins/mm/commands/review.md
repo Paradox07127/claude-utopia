@@ -38,6 +38,7 @@ Otherwise pick from the table.
   - when reviewing a whole module (`--paths X --full`).
 - When unsure, use normal mode.
 - For a Gemini view: `--models codex,grok,agy`.
+- For a DeepSeek view: `--models codex,grok,deepseek`.
 
 ## Start
 
@@ -46,6 +47,8 @@ mmrun review [scope] [options]
 ```
 
 Then follow mmrun's output. When the run ends, the plugin sends each model's critical/major findings and the judge rules.
+
+After the models end, mmrun has each model's findings checked by another model; findings come tagged confirmed/plausible/refuted, `--top` leaves out refuted ones; a confirmed finding keeps the higher of the two severities, the others take the checker's. `--no-verify` skips this step; `mmrun verify <RUNID>` runs it again.
 
 mmrun keeps the material small:
 - Lockfiles, JSON, test data, generated files (also `linguist-generated`, `linguist-vendored` and `-diff` in `.gitattributes`) and scratch files (`.orig`, `.bak`, `.notes/`) are left out; the models see them listed (`LEFT OUT` line).

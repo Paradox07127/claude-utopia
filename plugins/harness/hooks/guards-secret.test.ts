@@ -139,6 +139,24 @@ describe('secret-files guard: Bash', () => {
   )
   shell('let through', ['declare -x OPENAI_API_KEY', 'typeset -x OPENAI_API_KEY', 'echo "\\$OPENAI_API_KEY"', 'echo "${OPENAI_API_KEY:+configured}"', 'echo "${OPENAI_API_KEY+configured}"', 'echo "${GH_TOKEN_PATH:+set}"'], false)
   shell('refused, case aside', ['cat ~/.Codex/auth.json', 'cat ~/.CLAUDE.json', 'cat deploy/OV.conf', 'grep -rn token ~/.CODEX'], true)
+  // A search with no path searches the cwd; sh -c runs its script; git commit -F reads the message from a file
+  shell('refused', ['rg KEY', 'grep -rn token'], true, `${HOME}/.codex`)
+  shell(
+    'refused',
+    ['cd ~/.codex && rg KEY', "bash -c 'echo $OPENAI_API_KEY'", 'sh -c env', "bash -lc 'printenv GH_TOKEN'", 'bash -c "sh -c env"', 'git commit -F ~/.codex/auth.json', 'git commit --file=~/.claude.json', 'git commit -F ~/.codex/auth.json -m x'],
+    true,
+  )
+  shell('let through', ['rg todo', 'git commit -F msg.txt'], false, PROJ)
+  shell('let through', ['grep token'], false, `${HOME}/.codex`)
+  shell('let through', ["bash -c 'ls'", "sh -c 'echo $PATH'", 'git commit -m "docs: mention ~/.codex/auth.json"'], false)
+  // sh -c runs in the cwd an earlier cd set; an option value is not a path or pattern; a quoted ; does not end the command
+  shell('refused', ["cd ~/.codex && bash -c 'cat auth.json'", "bash -c 'ls; env'", 'bash -c "ls; env"', "sh -c 'true && cat ~/.codex/auth.json'"], true)
+  shell('refused', ['rg -A 3 KEY', "rg -g '*.toml' KEY", 'grep -rn -m 1 token'], true, `${HOME}/.codex`)
+  shell('let through', ["cd /tmp && bash -c 'cat notes.txt'", "echo 'a; b'", 'git commit -m "fix: a; b"', "bash -c 'ls; pwd'"], false)
+  shell('let through', ['rg -A 3 todo'], false, PROJ)
+  // In $'…' a \' is a literal apostrophe, and a quote in a comment or heredoc opens nothing
+  shell('refused', ["echo $'it\\'s' ; env", "echo $'\\'' && printenv GH_TOKEN", "true # it's\nenv", "cat <<'EOF' | bash\necho don't\nenv\nEOF"], true)
+  shell('let through', ["echo $'a\\'b'", 'git commit -m "fix: a; b"', "echo 'a; b'"], false)
 })
 
 describe('secret-files guard: reasons and the log', () => {

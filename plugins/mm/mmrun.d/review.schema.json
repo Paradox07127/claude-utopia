@@ -8,7 +8,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["severity", "file", "line", "quote", "claim", "failure_scenario", "basis", "suggestion", "issue_identity"],
+        "required": ["severity", "file", "line", "quote", "claim", "failure_scenario", "basis", "suggestion", "issue_identity", "pre_existing"],
         "properties": {
           "severity": { "type": "string", "enum": ["critical", "major", "minor", "optional"], "description": "critical = data loss/corruption, security control fails, or always wrong; major = wrong under normal use with reasonable input; minor = needs an unusual precondition (state it in failure_scenario). When unsure pick the lower one; exception: a security control failing on a normal path is never downgraded." },
           "file": { "type": "string" },
@@ -18,7 +18,8 @@
           "failure_scenario": { "type": "string", "description": "Which input / timing -> which wrong result." },
           "basis": { "type": "string", "enum": ["traced", "ran", "inferred"], "description": "traced: followed the code path by reading it; ran: executed a command that shows it; inferred: reasoning without either." },
           "suggestion": { "type": ["string", "null"], "description": "Concrete fix; null in brief mode unless it fixes a real bug." },
-          "issue_identity": { "type": "string", "description": "2-4 lowercase English words joined by hyphens naming the mechanism, e.g. missing-lock-on-write. No file names." }
+          "issue_identity": { "type": "string", "description": "2-4 lowercase English words joined by hyphens naming the mechanism, e.g. missing-lock-on-write. No file names." },
+          "pre_existing": { "type": "boolean", "description": "true = the problem existed before this change and the change does not make it worse." }
         }
       }
     },

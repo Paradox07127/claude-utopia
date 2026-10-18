@@ -11,6 +11,7 @@ const VALUED = new Set([
   '--grok-model',
   '--codex-model',
   '--agy-model',
+  '--deepseek-model',
   '--patch',
   '--model',
   '--task',
